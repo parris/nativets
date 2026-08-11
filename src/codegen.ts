@@ -32,7 +32,7 @@ import { isUnionTy, unionCommonField, widenLiteralTys } from "./ast.ts";
 import { unionDiscriminant, unionTagValues, unionWidenedMembers, objectLayoutFits } from "./ast.ts";
 import { exprLoc } from "./ast.ts";
 import { isOptChainExpr, isStructMsgTy } from "./checker.ts";
-import type { ArrowFunction, AssignExpr, TryStmt } from "./ast.ts";
+import type { ArrowFunction, AssignExpr, ThrowStmt } from "./ast.ts";
 import { nyi, NYI, internalError, NTError } from "./diagnostics.ts";
 
 export function llvmDouble(n: number): string {
@@ -128,37 +128,39 @@ function scanUsesActors(node: unknown): boolean {
  * ========================================================================== */
 
 /** The type a raise can carry across a frame, or `null` if it cannot. These are exactly
- *  the two shapes `emitExcCheck` already reconstructs into a catch binding. */
-function raisableTy(t: Ty | undefined): Ty | null {
-  if (t === "string") return "string";
-  if (t !== undefined && isObjectTy(t) && fieldType(t, "message") === "string" && objectFields(t).length === 1) return t;
-  return null;
+ *  the two shapes `emitExcCheck` already reconstructs into a catch binding. The empty
+ *  string is the "cannot" answer -- unambiguous, since no real type is spelled that way. */
+function raisableTy(t: Ty | undefined): Ty {
+  if (t === undefined) return "";
+  const b: Ty = t;
+  if (b === "string") return "string";
+  if (!isObjectTy(b) || objectFields(b).length !== 1) return "";
+  const f = fieldType(b, "message");
+  if (f === undefined) return "";
+  const ft: Ty = f;
+  return ft === "string" ? b : "";
 }
-
-/** The `catch` binding type of a `try`, defaulted the way `TryStmt` lowering defaults it.
- *  `null` for a `try` with NO `catch`: a `finally` does not handle, so it does not cover. */
-function coverTy(s: TryStmt): Ty | null { return s.handler ? (s.catchTy ?? "string") : null; }
 
 /** Uncovered `throw`s in ONE frame. `out` collects the raisable type of each throw that
  *  no local `catch` covers; `bad` is set by anything that disqualifies the whole
  *  function — a throw inside an arrow (a frame this walk is not describing), or a thrown
  *  value the flag cannot carry. */
-function frameThrows(node: unknown, covered: boolean, inArrow: boolean, out: (t: Ty | null) => void): void {
+function frameThrows(node: unknown, covered: boolean, inArrow: boolean, out: (t: Ty) => void): void {
   if (node === null || typeof node !== "object") return;
   if (Array.isArray(node)) { for (const x of node) frameThrows(x, covered, inArrow, out); return; }
   const n = node as Record<string, unknown>;
   if (n.kind === "ThrowStmt") {
     const arg = n.argument as Expr;
-    if (inArrow) out(null); // an arrow's throw is not this frame's `ret` to take
+    if (inArrow) out(""); // an arrow's throw is not this frame's `ret` to take
     else if (!covered) out(raisableTy(arg.ty));
     frameThrows(n.argument, covered, inArrow, out);
     return;
   }
   if (n.kind === "TryStmt") {
-    const t = node as unknown as TryStmt;
-    frameThrows(t.block, coverTy(t) !== null || covered, inArrow, out);
-    if (t.handler) frameThrows(t.handler, covered, inArrow, out);
-    if (t.finalizer) frameThrows(t.finalizer, covered, inArrow, out);
+    // A `finally` does not HANDLE, so a catch-less `try` does not cover its block.
+    frameThrows(n.block, !!n.handler || covered, inArrow, out);
+    if (n.handler) frameThrows(n.handler, covered, inArrow, out);
+    if (n.finalizer) frameThrows(n.finalizer, covered, inArrow, out);
     return;
   }
   if (n.kind === "ArrowFunction") { for (const k in n) frameThrows(n[k], covered, true, out); return; }
@@ -180,11 +182,12 @@ function scanUses(
   if (Array.isArray(node)) { for (const x of node) scanUses(x, covered, inArrow, onCall, onValue); return; }
   const n = node as Record<string, unknown>;
   if (n.kind === "TryStmt") {
-    const t = node as unknown as TryStmt;
-    const inner = coverTy(t);
-    scanUses(t.block, inner ?? covered, inArrow, onCall, onValue);
-    if (t.handler) scanUses(t.handler, covered, inArrow, onCall, onValue);
-    if (t.finalizer) scanUses(t.finalizer, covered, inArrow, onCall, onValue);
+    // Defaulted the way `TryStmt` lowering defaults it; `null` (does not cover) for a
+    // `try` with no `catch`, whose `finally` does not handle.
+    const inner: Ty | null = n.handler ? ((n.catchTy as Ty | undefined) ?? "string") : null;
+    scanUses(n.block, inner ?? covered, inArrow, onCall, onValue);
+    if (n.handler) scanUses(n.handler, covered, inArrow, onCall, onValue);
+    if (n.finalizer) scanUses(n.finalizer, covered, inArrow, onCall, onValue);
     return;
   }
   // A nested `function` declaration and an arrow BODY are each a frame of their own, so
@@ -212,58 +215,93 @@ function scanUses(
  * The proved-escaping set. See the block comment above for the four rules; every one of
  * them is a way to LEAVE the set, so the empty answer is always the safe one and a
  * program this scan cannot reason about compiles exactly as it did before.
+ *
+ * PARALLEL ARRAYS, not a `Map` keyed by name, and that is a subset obligation rather than
+ * a style choice. The first cut accumulated into a `Set` from inside the `scanUses`
+ * callbacks -- and `Set.add` MUTATES under bun while it is PERSISTENT in the language this
+ * compiler implements, so every disqualification the callbacks recorded would be silently
+ * discarded once this compiler compiles itself. Not a refusal: a scan that answers "every
+ * caller checks" about functions whose callers do not. `.push` on a `//@@mutable` array is
+ * the one accumulator that means the same thing under both.
  */
-function scanEscaping(program: Program): Set<string> {
-  if (scanUsesActors(program)) return new Set<string>(); // rule 4: the scheduler is a caller we cannot see
+function scanEscaping(program: Program, usesActors: boolean): Set<string> {
+  if (usesActors) return new Set<string>(); // rule 4: the scheduler is a caller we cannot see
+
+  // ---- seed: a function whose own `throw` no local `catch` covers, paired with the one
+  // carriable type all of its uncovered throws agree on. `frameThrows` reports `""` for a
+  // throw that disqualifies the frame outright (one inside an arrow, or a value the flag
+  // cannot carry).
   //@@mutable
-  const seed = new Map<string, Ty>();
+  const names: string[] = [];
+  //@@mutable
+  const tys: string[] = [];
   for (const s of program.body) {
     if (s.kind !== "FuncDecl") continue;
     //@@mutable
-    const tys: (Ty | null)[] = [];
-    frameThrows(s.body, false, false, (t) => tys.push(t));
-    if (tys.length === 0) continue;
-    // Rules 3+4: one carriable type, agreed by every uncovered throw in the frame.
-    if (tys.some((t) => t === null || t !== tys[0])) continue;
-    seed.set(s.name, tys[0]!);
+    const seen: string[] = [];
+    frameThrows(s.body, false, false, (t: Ty) => { seen.push(t); });
+    if (seen.length === 0) continue;
+    const first = seen[0]!;
+    if (first === "" || seen.some((t) => t !== first)) continue; // rules 3+4
+    names.push(s.name);
+    tys.push(first);
   }
-  if (seed.size === 0) return new Set<string>();
+  if (names.length === 0) return new Set<string>();
 
-  // A method is a top-level `Class.m`, and its call sites name only `m`. Index both
-  // spellings so the disqualifying passes below see a method's uses at all.
+  // ---- every mention of a name, recorded verbatim and judged afterwards. `where` is the
+  // frame the mention sits in: `main`'s own body, some other function's, or an arrow's
+  // (a frame this scan is not describing, so it never counts as covered).
   //@@mutable
-  const keyOf = new Map<string, string[]>();
-  for (const name of seed.keys()) {
-    const dot = name.lastIndexOf(".");
-    const keys = dot < 0 ? [name] : [name, `.${name.slice(dot + 1)}`];
-    for (const k of keys) keyOf.set(k, [...(keyOf.get(k) ?? []), name]);
-  }
+  const callKey: string[] = [];
   //@@mutable
-  const dead = new Set<string>();
-  const kill = (key: string): void => { for (const n of keyOf.get(key) ?? []) dead.add(n); };
-
-  // Top-level statements are `main`'s frame: an UNCOVERED call there is node's uncaught
-  // exception, which `emitExcCheck`'s null-handler arm already renders (stderr, exit 1).
-  // Inside any other frame an uncovered call would have to propagate a second time, and
-  // that is the case this lane does not implement.
+  const callCov: string[] = []; // "" = no `catch` covers this call site
+  //@@mutable
+  const callWhere: string[] = [];
+  //@@mutable
+  const valueUse: string[] = [];
   const visit = (body: Stmt[], isMain: boolean): void => {
     scanUses(body, null, false,
-      (names, cov, inArrow) => {
-        for (const key of names) {
-          if (!keyOf.has(key)) continue;
-          if (cov === null) { if (!isMain || inArrow) kill(key); continue; }
-          for (const n of keyOf.get(key)!) if (seed.get(n) !== cov) dead.add(n); // rule 3
+      (keys: string[], cov: Ty | null, inArrow: boolean) => {
+        for (const k of keys) {
+          callKey.push(k);
+          callCov.push(cov ?? "");
+          callWhere.push(inArrow ? "arrow" : (isMain ? "main" : "frame"));
         }
       },
-      (name) => kill(name), // rule 2: a value use is a call we cannot instrument
+      (n: string) => { valueUse.push(n); },
     );
   };
   visit(program.body.filter((s) => s.kind !== "FuncDecl"), true);
   for (const s of program.body) if (s.kind === "FuncDecl") visit(s.body, false);
 
+  // ---- judge. `dead[i]` is "seed function i is NOT provably escaping".
   //@@mutable
-  const out = new Set<string>();
-  for (const name of seed.keys()) if (!dead.has(name)) out.add(name);
+  const dead: boolean[] = names.map(() => false);
+  for (let i = 0; i < names.length; i++) {
+    const name = names[i]!;
+    // A method is a top-level `Class.m` whose call sites name only `m`, so it answers to
+    // the `.m` key too -- resolved by PROPERTY, which over-approximates, and
+    // over-approximating a function's call sites can only disqualify more.
+    const dot = name.lastIndexOf(".");
+    const alt = dot < 0 ? "" : `.${name.slice(dot + 1)}`;
+    for (const u of valueUse) if (u === name || (alt !== "" && u === alt)) dead[i] = true; // rule 2
+    for (let c = 0; c < callKey.length; c++) {
+      const k = callKey[c]!;
+      if (k !== name && (alt === "" || k !== alt)) continue;
+      // Uncovered: in `main` that IS node's uncaught exception, which `emitExcCheck`'s
+      // null-handler arm already renders (stderr, exit 1). Anywhere else it would have to
+      // propagate a SECOND frame, which is the case this lane does not implement.
+      if (callCov[c]! === "") { if (callWhere[c]! !== "main") dead[i] = true; continue; }
+      if (callCov[c]! !== tys[i]!) dead[i] = true; // rule 3: the binding takes ONE type
+    }
+  }
+
+  // REBOUND, not `.add`-and-discard: a nativets `Set` is persistent, so the discarded
+  // spelling adds nothing there while bun's mutating `Set.add` makes it look right —
+  // the same divergence `Checker.statics` already records in src/checker.ts.
+  //@@mutable
+  let out = new Set<string>();
+  for (let i = 0; i < names.length; i++) if (!dead[i]!) out = out.add(names[i]!);
   return out;
 }
 
@@ -949,7 +987,7 @@ class ModuleGen {
   build(program: Program): string {
     this.usesActors = scanUsesActors(program);
     this.hasTry = scanHasTry(program);
-    this.escaping = scanEscaping(program);
+    this.escaping = scanEscaping(program, this.usesActors);
     this.hostImports = new Set(program.hostImports ?? []);
     this.recTypes = recTypeTable(program); // `@Name` back-edges (empty for most programs)
     this.recordTags = new Set(program.mutableRecords ?? []);
@@ -3773,15 +3811,8 @@ class FnGen {
    */
   private genPropagate(s: ThrowStmt): boolean {
     const v = this.genExpr(s.argument);
-    let msg: string;
-    if (v.ty === "string") msg = v.v;
-    else if (isObjectTy(v.ty) && fieldType(v.ty, "message") === "string") {
-      const g = this.fresh();
-      this.emit(`${g} = getelementptr i64, ptr ${v.v}, i64 ${fieldIndex(v.ty, "message")}`);
-      const raw = this.fresh();
-      this.emit(`${raw} = load i64, ptr ${g}`);
-      msg = this.fromSlot(raw, "string");
-    } else return false;
+    const msg = this.raisedMessage(v);
+    if (msg === "") return false;
     this.mod.usesUncaughtThrow = true;
     this.emit(`call void @nt_exc_raise_msg(ptr ${msg})`);
     // `nt_obj_free` is SHALLOW, so freeing a thrown `new Error(m)` here does not touch
@@ -3792,17 +3823,38 @@ class FnGen {
     return true;
   }
 
+  /**
+   * The message string a thrown value raises with, or `""` for a value that carries none
+   * (`throw 42`, `throw {a:1}`) — the caller then keeps the NT1004 refusal rather than
+   * inventing text for it. `""` is unambiguous as the "no message" answer: every message
+   * this returns is an SSA name or a global symbol, never the empty spelling.
+   *
+   * Factored out of `genUncaught` (where `genPropagate` had copied it) because the
+   * comparison it is built on, `fieldType(t, "message") === "string"`, is one this
+   * compiler REFUSES when it checks itself — `fieldType` answers `Ty | undefined` and a
+   * nullable may not be compared with a string. Guarding the `undefined` and rebinding
+   * before the comparison is the spelling that passes, and doing it once means one
+   * function inside the subset instead of two outside it.
+   */
+  private raisedMessage(v: Val): string {
+    const t: Ty = v.ty;
+    if (t === "string") return v.v;
+    if (!isObjectTy(t)) return "";
+    const f = fieldType(t, "message");
+    if (f === undefined) return "";
+    const ft: Ty = f;
+    if (ft !== "string") return "";
+    const g = this.fresh();
+    this.emit(`${g} = getelementptr i64, ptr ${v.v}, i64 ${fieldIndex(t, "message")}`);
+    const raw = this.fresh();
+    this.emit(`${raw} = load i64, ptr ${g}`);
+    return this.fromSlot(raw, "string");
+  }
+
   private genUncaught(argument: Expr): boolean {
     const v = this.genExpr(argument);
-    let msg: string;
-    if (v.ty === "string") msg = v.v;
-    else if (isObjectTy(v.ty) && fieldType(v.ty, "message") === "string") {
-      const g = this.fresh();
-      this.emit(`${g} = getelementptr i64, ptr ${v.v}, i64 ${fieldIndex(v.ty, "message")}`);
-      const raw = this.fresh();
-      this.emit(`${raw} = load i64, ptr ${g}`);
-      msg = this.fromSlot(raw, "string");
-    } else return false;
+    const msg = this.raisedMessage(v);
+    if (msg === "") return false;
     this.mod.usesUncaughtThrow = true;
     this.emit(`call void @nt_exc_raise_msg(ptr ${msg})`);
     this.emit(`call void @nt_exc_abort()`);
