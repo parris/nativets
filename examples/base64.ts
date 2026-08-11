@@ -6,8 +6,10 @@
 //
 // INPUT comes from `process.argv` (Host I/O FFI); the transform is the stdlib
 // `btoa(s)` / `atob(s)` pair (node has both as globals, so it is the oracle).
-// ASCII input only — btoa/atob work on UTF-8 bytes, and for ASCII that matches
-// node byte-for-byte. Compiles + runs identically under `node` and nativets and
+// ASCII input only — not because the pair is limited to it (btoa/atob implement
+// the BINARY-STRING contract, so U+0000..U+00FF encodes and `atob` round-trips
+// it), but because `decode` prints whatever bytes it is given and a CLI arg is
+// the untrusted end. Compiles + runs identically under `node` and nativets and
 // cross-compiles to macOS / Linux / iOS / Android unchanged (libc-only runtime).
 // Written in the immutable subset: no mutation, no classes — just argv slicing,
 // the two globals, string methods, and `if` / ternary.

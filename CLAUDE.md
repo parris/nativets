@@ -48,7 +48,12 @@ came from.
 
 ```sh
 bun test                      # everything (~7 min)
-bun test test/foo.test.ts     # one file — what you'll use in the loop
+bun test --timeout 60000 test/foo.test.ts   # one file — what you'll use in the loop
+                              # ^ REQUIRED: `bun run test` sets this, but a BARE
+                              # `bun test` defaults to 5000ms, and every test here
+                              # invokes clang. Under load a starved test then fails
+                              # FAST (the timeout caps at 5001ms), which reads as a
+                              # real failure rather than a slow one.
 bun run src/cli.ts run x.ts   # compile + run a single program
 bun run src/cli.ts coverage x.ts   # what blocks a program, by NT code
 bun run test/blocker-metric.ts     # stage-1: how many of the compiler's own functions

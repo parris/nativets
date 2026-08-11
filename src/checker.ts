@@ -5056,7 +5056,10 @@ class Checker {
           if (vt !== "number" && vt !== "string" && vt !== "boolean") throw nyi(NYI.OBJECT, `Object.fromEntries value of type ${vt}`);
           fields.push(`${key}:${vt}`);
         }
-        return `{${fields.join(",")}}` as Ty;
+        // Canonicalized like every other minted object type — `Object.fromEntries` builds a
+        // key set as freely as an object literal does, so `[["b",…],["2",…]]` must enumerate
+        // `2` first exactly as `{b:…,"2":…}` does.
+        return objectType(objectFields(`{${fields.join(",")}}` as Ty));
       }
       // --- stdlib Batch 3 ---
       // `Object.freeze(o)` is the IDENTITY here and honestly so: objects are already
