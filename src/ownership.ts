@@ -490,11 +490,24 @@ class Analyzer {
    *  so every pre-existing entry reads exactly as before; the addition is `this.<field>`,
    *  which became reachable when a `@@mutable` class's array field learned `.push`
    *  (`Checker.accumulatorName`). Without the path key that append was a SILENT WRONG
-   *  ANSWER rather than a refusal — see `iterationPath`. */
+   *  ANSWER rather than a refusal — see `iterationPath`.
+   *
+   *  A count of ZERO means "not borrowed"; the key is not removed. That is what keeps
+   *  `popBorrow` inside the subset `src/` compiles, and it is the only spelling that can
+   *  be. `.set`/`.add` return the RECEIVER under node and a NEW collection here, so the
+   *  `x = x.set(…)` rebind means the same thing in both — but `.delete` returns a BOOLEAN
+   *  under node, so `this.borrowed = this.borrowed.delete(n)` would assign `true` when
+   *  this compiler runs on `bun`. There is no `.delete` spelling that is correct in both
+   *  languages, so the count carries the answer instead of the key's presence.
+   *
+   *  Sound because `isBorrowed` is the ONLY reader of this map — nothing iterates it and
+   *  nothing reads `.size`, so a resting zero entry is indistinguishable from an absent
+   *  one. An unmatched `popBorrow` drives the count to 0 or below, which the old code
+   *  reached by deleting an absent key; `> 0` answers false for both. */
   private borrowed = new Map<string, number>();
   private pushBorrow(n: string): void { this.borrowed = this.borrowed.set(n, (this.borrowed.get(n) ?? 0) + 1); }
-  private popBorrow(n: string): void { const c = (this.borrowed.get(n) ?? 1) - 1; if (c <= 0) this.borrowed.delete(n); else this.borrowed = this.borrowed.set(n, c); }
-  private isBorrowed(n: string): boolean { return this.borrowed.has(n); }
+  private popBorrow(n: string): void { this.borrowed = this.borrowed.set(n, (this.borrowed.get(n) ?? 1) - 1); }
+  private isBorrowed(n: string): boolean { return (this.borrowed.get(n) ?? 0) > 0; }
 
   /**
    * The BORROW PATH of a for-of iterable / mutation receiver, or `null` when this scope
