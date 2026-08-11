@@ -6522,10 +6522,10 @@ class Checker {
     // masked). A local `const` narrows; a property read does not.
     const selfName = arrow.selfName;
     const params = new Set(arrow.params.map((p) => p.name));
-    const locals = new Set<string>();
+    let locals = new Set<string>();
     const free = new Set<string>();
     if (arrow.exprBody) collectIdents(arrow.body as Expr, free);
-    else for (const s of arrow.stmts as Stmt[]) { collectIdentsStmt(s, free); collectBlockLocals(s, locals); }
+    else for (const s of arrow.stmts as Stmt[]) { collectIdentsStmt(s, free); locals = collectBlockLocals(s, locals); }
     //@@mutable
     const caps: { name: string; ty: Ty }[] = [];
     for (const n of free) {
@@ -7699,9 +7699,18 @@ function alwaysExits(body: Stmt[]): boolean {
     s.kind === "ReturnStmt" || s.kind === "ThrowStmt" || s.kind === "BreakStmt" || s.kind === "ContinueStmt");
 }
 
-function collectBlockLocals(s: Stmt, out: Set<string>): void {
-  if (s.kind === "VarDecl") for (const d of s.decls) out.add(d.name);
-  else if (s.kind === "ForOfStmt" || s.kind === "ForInStmt") out.add(s.name);
+/**
+ * RETURNS the extended set rather than filling an out-parameter. A Set is persistent here,
+ * so `out.add(x)` on a parameter is a discarded result (NT1606) — and the rebinding form
+ * `out = out.add(x)` would be strictly worse, a LOST UPDATE the caller never sees. Handing
+ * the new set back is the only shape that works, and it is identical under node, where
+ * `.add` returns the receiver and every assignment below is a self-assignment.
+ */
+function collectBlockLocals(s: Stmt, out: Set<string>): Set<string> {
+  let next = out;
+  if (s.kind === "VarDecl") for (const d of s.decls) next = next.add(d.name);
+  else if (s.kind === "ForOfStmt" || s.kind === "ForInStmt") next = next.add(s.name);
+  return next;
 }
 
 /* ------------------------------------------------------------
@@ -7723,10 +7732,10 @@ function collectBlockLocals(s: Stmt, out: Set<string>): void {
  * The value in the map is the offending write as written, for the diagnostic.
  * ------------------------------------------------------------ */
 function collectEscapingWrites(arrow: ArrowFunction, out: Map<string, string>): void {
-  const bound = new Set(arrow.params.map((p) => p.name));
+  let bound = new Set(arrow.params.map((p) => p.name));
   if (arrow.exprBody) { escapingWritesExpr(arrow.body as Expr, bound, out); return; }
   const body = arrow.stmts as Stmt[];
-  for (const s of body) collectBlockLocals(s, bound);
+  for (const s of body) bound = collectBlockLocals(s, bound);
   escapingWritesStmts(body, bound, out);
 }
 
