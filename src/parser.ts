@@ -800,6 +800,15 @@ class Parser {
           .map((n) => `'${n}': ${clip(why.get(n) ?? "no shape was produced", 160)}`);
         this.cycleStall = sample.join("; ") + (deferred.length > sample.length ? ` (and ${deferred.length - sample.length} more that select over them)` : "");
         this.cycleStallSize = { total: names.length, left: deferred.length };
+        // NOT YET SINGLE-OWNER, and deliberately left: these three (and `cyclicTypes`
+        // below) DISCARD a persistent mutator's result, so under this compiler's own
+        // semantics they do nothing. That is NT1606's rule and it REFUSES rather than
+        // miscompiles, so it is a blocker and not a correctness hole — but it is MASKED
+        // here, behind `deferred.push` earlier in this function, so the blocker metric will
+        // only surface it once `push` is solved. Whoever gets there: do NOT take NT1606's
+        // suggested `x = x.delete(k)` literally in this file. It is right about nativets and
+        // says so itself, but src/ also runs under bun, where node's `.delete` returns a
+        // BOOLEAN — measured, `x` becomes `true`. Rebuild or restore wholesale instead.
         for (const n of names) this.cycleNames.delete(n);
         this.recTypes.clear();
         for (const [n, s] of recBefore) this.recTypes = this.recTypes.set(n, s);
