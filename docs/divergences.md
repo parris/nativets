@@ -698,14 +698,30 @@ constant `NaN`** — the identical argument to NT1032's `[object Object]` one di
 constant holds only for a value with **no own `valueOf`/`toString`**; node calls the method when
 a class defines one, and this compiler has no prototype chain to consult at the coercion site.
 Answering NaN unconditionally would trade a loud build error for a silent wrong answer in
-exactly the programs that bothered to define it. `NaN` is also never the number the line meant,
-so the hint says so: read the field you meant (`+o.count`), use `m.size` for a `Map`/`Set`, and
-— because node **joins** a `Uint8Array` — index it (`u[0]`) rather than coercing the whole thing.
+exactly the programs that bothered to define it.
+
+**The hint separates the exact answer from the guess at intent**, because a hint that quietly
+hands back a *different value* is the `.at(-1)`-for-`a[-1]` mistake. Writing `NaN` is **exact**
+— it is node's own answer for an object, a class instance, a `Map` and a `Set`, measured. The
+alternatives it also offers (`+o.count`, `m.size`, `u[0]`) are **not** spellings of the
+coercion and the hint says so. The `Uint8Array` row carries its own warning, because it is the
+one that looks like the others and is not: node **joins** it, so `+new Uint8Array([5])` is `5`
+and `+new Uint8Array([1,2])` is `NaN`. All three claims are compiled against node in
+`test/number-coercion.test.ts` rather than asserted.
 
 A **general ToPrimitive is not implementable here** and this is not a step toward one: objects
 are flat records whose slot layout is fixed at compile time, and methods resolve from the type
 tag rather than from a chain carried by the value. Every row above is either a rule this
 compiler can state exactly (`Date`'s `valueOf`, an array's `join`, a box's tag) or a refusal.
+
+**STILL OPEN — unary `-` does not share the coercion.** `-x` is ToNumber(x) then negate, so
+`-new Date(1000)` is `-1000` in node; here it is still `NT2001` *"Unary '-' needs number, got
+Date"*. That asymmetry is what hid the whole defect (one door guarded, its sibling silently
+answering NaN), and closing it is two lines — route `-` through `checkNumberCoercion` as `+`
+now is. It was left alone on purpose: it would also move every *other* `-` refusal from
+`NT2001` (a type error) to `NT1039` (an unimplemented feature), which is a different
+conversation. What remains is a **refusal**, not a wrong answer, so no rule is broken — the
+same is true of `~x`, which requires a `number` outright.
 
 `coerceToNumber` now raises an internal error rather than falling through to NaN. Pinned in
 `test/number-coercion.test.ts`; the originating reports are in `test/fuzz2-diff.test.ts`.

@@ -105,8 +105,15 @@ describe("fuzz2 findings — wrong answers", () => {
    * FIXED — `coerceToNumber` (src/codegen.ts) has a Date case: a Date IS its time value
    * here, and `ToPrimitive(d, number)` runs `valueOf` first, so the coercion is the
    * identity. `%d` in console.log already applied that rule, which is the evidence the
-   * missing one was an oversight. `-date` is STILL refused: that is a refusal rather than
-   * a wrong answer, so it breaks no rule, and it is left to the lane that widens `-`.
+   * missing one was an oversight.
+   *
+   * The asymmetry is NOT closed, deliberately: `-date` is still `NT2001`. `-x` is ToNumber
+   * then negate, so routing it through the same `checkNumberCoercion` would be two lines —
+   * but that also moves every OTHER `-` refusal from `NT2001` to `NT1039`, which is a
+   * scope this lane was not asked to widen. It leaves a REFUSAL rather than a wrong
+   * answer, so it breaks no rule; it is noted in docs/divergences.md so the next lane on
+   * `-` inherits the reason rather than rediscovering it.
+   *
    * Owned with the rest of the numeric coercions in test/number-coercion.test.ts.
    */
   it("unary + on a Date is its time value", async () => {
