@@ -319,8 +319,48 @@ describe("fuzz findings — base64", () => {
    * plausible-looking answer at exit 0. This is §A.2's byte orientation reaching a function
    * whose whole contract is about which bytes those are, and §A.2 does not cover it.
    */
-  it.failing("btoa is Latin-1, and rejects a code point above U+00FF", async () => {
+  it("btoa is Latin-1, and rejects a code point above U+00FF", async () => {
     await expectSameBytes('console.log(btoa("\\u00e9"));\n'); // node 6Q==, ours w6k=
+  });
+
+  /*
+   * The whole U+0000..U+00FF byte range, in one program, both directions. NUL is excluded
+   * from the sweep on purpose: our strings are NUL-TERMINATED, so a NUL inside one is a
+   * pre-existing representation limit (a NUL in a LITERAL is already `NT1705`), not
+   * something this pair can decide — see the `btoa("a\0b")` note below.
+   */
+  it("btoa/atob round-trip every byte U+0001..U+00FF", async () => {
+    await expectSameBytes([
+      'let acc = "";',
+      "for (let i = 1; i <= 255; i++) { acc = acc + String.fromCharCode(i); }",
+      "const enc = btoa(acc);",
+      "console.log(enc);",
+      "console.log(enc.length);",
+      "console.log(atob(enc) === acc);",
+      // The high half alone — every one of these decodes to a 2-byte UTF-8 sequence on
+      // stdout, which is where the raw-byte compare earns its keep.
+      'console.log(atob("gIGC/f7/"));',
+      "",
+    ].join("\n"));
+  });
+
+  /* Above U+00FF there IS no byte, so node throws — including for a lone surrogate,
+   * which is a code point in the string and not a character in any encoding. One program,
+   * so the first throw does not hide the other four; the UNCAUGHT exit code is proved
+   * separately below (the handler must not be what makes these agree). */
+  it("btoa throws above U+00FF, for a BMP char and for a lone surrogate", async () => {
+    await expectSameBytes([
+      ...["\\u0100", "\\u4f60", "\\ud800", "\\udfff", "\\uffff", "\\u00ff", "\\u007f"].map(
+        (lit) => `try { console.log(btoa("${lit}")); } catch (e: string) { console.log("threw"); }`,
+      ),
+      "",
+    ].join("\n"));
+  });
+
+  /* The uncaught arm: stdout stops where node's stops, and the exit code is node's 1. */
+  it("an uncaught btoa/atob throw exits 1 with node's stdout", async () => {
+    await expectSameBytes('console.log("before");\nconsole.log(btoa("\\u4f60"));\nconsole.log("unreachable");\n');
+    await expectSameBytes('console.log("before");\nconsole.log(atob("!!!!"));\nconsole.log("unreachable");\n');
   });
 
   /*
@@ -328,13 +368,83 @@ describe("fuzz findings — base64", () => {
    * InvalidCharacterError. Ours accepts all three and returns a decoded string — the
    * silent-wrong-answer direction on untrusted input.
    */
-  it.failing("atob rejects malformed input instead of decoding it", async () => {
+  it("atob rejects malformed input instead of decoding it", async () => {
     const src = 'console.log(atob("YQ==="));\nconsole.log("after");\n';
     const oracle = nodeRun(src);
     const ours = await ourRun(src);
     if (isRefusal(ours)) throw new Error(`refused: ${ours.refused}`);
     expect(oracle.exitCode).toBe(1); // node throws
     expect(ours.exitCode).toBe(oracle.exitCode); // ours exits 0 having printed "a"
+  });
+
+  /* Every rejected shape, in one program, each behind its own handler so the first throw
+   * does not mask the rest. `"AAAAA"` and `"Y"` are the LENGTH failure (all-alphabet,
+   * %4 == 1); the others are the CHARACTER failure — including `"A==="`, whose two
+   * strippable `=` leave a third, and `"\v"`, which is NOT one of the five ASCII
+   * whitespace code points forgiving-base64 strips. The trailing three are accepted, so
+   * this table also pins where the boundary is rather than only that there is one. */
+  it("atob rejects each malformed shape, and node's stdout for it", async () => {
+    const shapes = ["YQ===", "!!!!", "YQ=", "Y", "=", "AAAAA", "YQ==X", "YQ=X=", "A===",
+                    "====", "-_", "\\u00e9", "\\u000bYQ==", "YQ==", "YQ", ""];
+    await expectSameBytes([
+      ...shapes.map((lit) => `try { console.log("[" + atob("${lit}") + "]"); } catch (e: string) { console.log("threw"); }`),
+      "",
+    ].join("\n"));
+  });
+
+  /* …and every shape node ACCEPTS, which is the half a "reject harder" fix breaks.
+   * Padding is optional (`"YQ"`), ASCII whitespace is stripped from ANYWHERE, and the
+   * unused low bits of a final symbol are DISCARDED rather than required to be zero
+   * (node decodes `"YR=="` to `"a"` exactly as it decodes `"YQ=="`).
+   *
+   * Every decoded byte here is non-zero on purpose: a base64 input that decodes to a NUL
+   * (`"AA=="`) is the pre-existing runtime-NUL door — our strings are NUL-terminated, so
+   * the value truncates — and it is documented with the rest of that table in
+   * docs/divergences.md rather than pretended away here. */
+  it("atob still accepts the forgiving-base64 shapes node accepts", async () => {
+    await expectSameBytes([
+      'console.log(atob("YQ=="), atob("YQ"), atob("YWJj"), atob("YWI="));',
+      // `.length` is asked only of an ASCII decode: for a byte above 0x7F it is UTF-8
+      // BYTES here and UTF-16 units in node (§A.2), so `atob("////").length` is 6 vs 3 —
+      // the documented index-space divergence, not a base64 one.
+      'console.log("[" + atob("") + "]", atob("bmF0aXZldHM=").length, atob("////") === "\\u00ff\\u00ff\\u00ff");',
+      'console.log(atob(" YQ== "), atob("Y Q =  ="), atob("\\tYQ==\\n"), atob("\\fYQ==\\r"));',
+      'console.log(atob("YR=="), atob("YQE="), atob("YQF="));',
+      'console.log(atob("bmF0aXZl").length, atob("bmF0aXZldA==").length);',
+      "",
+    ].join("\n"));
+  });
+
+  /* The raise crosses on the pending-exception slot (`nt_exc_raise_msg`), the same way
+   * `JSON.parse`'s does — so it is CATCHABLE in a `try` in the same frame, and the program
+   * runs on to exit 0. The handler prints a constant: node's `e` is a DOMException and ours
+   * is the message string, a pre-existing difference in every runtime-raised message's
+   * SHAPE that is not what this test is about. */
+  /* …and being fallible means `emitExcCheck`'s existing REFUSALS reach these calls, which
+   * is the half of "follow the JSON.parse precedent" that is easy to claim in prose and not
+   * check. A `finally`-only `try` has no catch block to branch to, so `NT1004` — the same
+   * answer `JSON.parse` in that position already gives, reached through the same code. */
+  it("btoa in a `finally`-only try is NT1004, exactly as JSON.parse there is", async () => {
+    for (const call of ['btoa("x")', 'atob("YQ==")', 'JSON.parse("1")']) {
+      const ours = await ourRun(`try { console.log(${call}); } finally { console.log("f"); }\n`);
+      if (!isRefusal(ours)) throw new Error(`${call} compiled; expected NT1004`);
+      expect([call, ours.refused.includes("NT1004")]).toEqual([call, true]);
+    }
+  });
+
+  it("the base64 throw is catchable in the same frame", async () => {
+    await expectSameBytes([
+      "try {",
+      '  console.log(btoa("\\u4f60"));',
+      '  console.log("not reached");',
+      '} catch (e: string) { console.log("caught btoa"); }',
+      "try {",
+      '  console.log(atob("!!!!"));',
+      '  console.log("not reached");',
+      '} catch (e: string) { console.log("caught atob"); }',
+      'console.log("after");',
+      "",
+    ].join("\n"));
   });
 });
 

@@ -6396,8 +6396,17 @@ class FnGen {
       case "Number": return { v: this.coerceToNumber(this.genExpr(args[0]!)), ty: "number" };
       case "String": return { v: this.coerceToString(this.genExpr(args[0]!)), ty: "string" };
       // --- stdlib (web standards) Batch 1: base64 globals ---
-      case "btoa": { const t = this.fresh(); this.emit(`${t} = call ptr @nt_btoa(ptr ${this.genExpr(args[0]!).v})`); return { v: t, ty: "string" }; }
-      case "atob": { const t = this.fresh(); this.emit(`${t} = call ptr @nt_atob(ptr ${this.genExpr(args[0]!).v})`); return { v: t, ty: "string" }; }
+      // BOTH ARE FALLIBLE, exactly like `decodeURIComponent` two cases below: node throws
+      // `InvalidCharacterError` for a `btoa` code point above U+00FF and for an `atob`
+      // input that is not forgiving-base64. So each needs the pending-exception check —
+      // without it the runtime's raise would set the flag and nothing would read it, which
+      // is how a throw turns back into the exit-0 wrong answer this pair is being fixed for.
+      case "btoa": case "atob": {
+        const t = this.fresh();
+        this.emit(`${t} = call ptr @nt_${name}(ptr ${this.genExpr(args[0]!).v})`);
+        this.emitExcCheck();
+        return { v: t, ty: "string" };
+      }
       // --- stdlib: URL parsing (WHATWG URL functional subset) — string in, string out ---
       // --- stdlib Batch 3: URI encoding. decode* is fallible (node's URIError). ---
       case "encodeURIComponent": case "encodeURI": {

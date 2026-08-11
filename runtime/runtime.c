@@ -2816,58 +2816,163 @@ double nt_date_now(void) {
 #endif
 }
 
-/* ---- base64 (btoa / atob) — pure byte ops over the string's bytes ---- */
+/* ---- base64 (btoa / atob) — the BINARY-STRING contract, not the byte buffer ----
+ *
+ * These used to be "pure byte ops over the string's bytes", and that is the one
+ * reading of them that is never right. `btoa`/`atob` are defined on a BINARY
+ * STRING: one CODE POINT per byte. A code point above U+00FF has no byte and is
+ * an `InvalidCharacterError`; it is not three UTF-8 bytes to encode. Ours encoded
+ * the UTF-8 (`btoa("é")` → `w6k=`, node `6Q==`) and, worse, answered `5L2g` at
+ * exit 0 for `btoa("你")`, which node REFUSES — a silent wrong answer on exactly
+ * the input whose whole point is which bytes come out.
+ *
+ * Our strings are UTF-8 (§A.2), so the code-point <-> byte mapping is the decode
+ * /encode pair below rather than a `memcpy`: `btoa` DECODES to code points and
+ * takes each one's single byte, and `atob` ENCODES each decoded byte back as the
+ * code point of that value. Both directions therefore agree with node's stdout
+ * BYTES, and `atob(btoa(s)) === s` holds for every `s` that `btoa` accepts.
+ *
+ * Both raise on the pending-exception slot (`nt_exc_raise_msg`), the same way
+ * `JSON.parse` and `decodeURIComponent` do, so codegen's `emitExcCheck` makes the
+ * throw catchable in a `try` in the same frame and exit 1 when it is not. */
 static const char B64_ENC[] =
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
+/* node names both failures `InvalidCharacterError`; the MESSAGE distinguishes a
+ * character outside the alphabet from a length that cannot be a base64 quantum. */
+static const char B64_ERR_CHAR[] = "InvalidCharacterError: Invalid character";
+static const char B64_ERR_LEN[] =
+  "InvalidCharacterError: The string to be decoded is not correctly encoded.";
+
+/* Decode ONE scalar of strict UTF-8 at s[*i..n); advance *i and return the code
+ * point, or return -1 for a truncated, overlong or otherwise malformed sequence.
+ * A lone surrogate (WTF-8, what the lexer and `String.fromCharCode` emit for
+ * `\ud800`) decodes as ITSELF — above U+00FF either way, so `btoa` refuses it
+ * exactly as node does. A malformed sequence is U+FFFD in node's string, also
+ * above U+00FF, so mapping it to -1 here reaches node's answer for its reason. */
+static long utf8_next(const unsigned char *s, size_t n, size_t *i) {
+  unsigned char c = s[*i];
+  if (c < 0x80) { (*i)++; return (long)c; }
+  size_t need;
+  long cp, min;
+  if ((c & 0xE0) == 0xC0) { need = 1; cp = c & 0x1F; min = 0x80; }
+  else if ((c & 0xF0) == 0xE0) { need = 2; cp = c & 0x0F; min = 0x800; }
+  else if ((c & 0xF8) == 0xF0) { need = 3; cp = c & 0x07; min = 0x10000; }
+  else return -1; /* a continuation byte or 0xF8..0xFF as a lead */
+  if (*i + need >= n) return -1; /* truncated */
+  for (size_t k = 1; k <= need; k++) {
+    unsigned char cc = s[*i + k];
+    if ((cc & 0xC0) != 0x80) return -1;
+    cp = (cp << 6) | (long)(cc & 0x3F);
+  }
+  if (cp < min || cp > 0x10FFFF) return -1; /* overlong, or out of range */
+  *i += need + 1;
+  return cp;
+}
+
 const char *nt_btoa(const char *s) {
-  size_t n = strlen(s);
-  size_t outlen = ((n + 2) / 3) * 4;
+  size_t n = nt_strlen(s);
+  const unsigned char *u = (const unsigned char *)s;
+  /* One code point is at least one input byte, so n bytes is always enough. */
+  unsigned char *bin = (unsigned char *)nativets_alloc(n + 1);
+  size_t m = 0, i = 0;
+  while (i < n) {
+    long cp = utf8_next(u, n, &i);
+    if (cp < 0 || cp > 0xFF) {
+      free(bin); /* unregistered scratch — `nt_str_register` never saw it */
+      nt_exc_raise_msg(B64_ERR_CHAR);
+      return nt_empty_str();
+    }
+    bin[m++] = (unsigned char)cp;
+  }
+  size_t outlen = ((m + 2) / 3) * 4;
   char *o = alloc_str(outlen);
   size_t j = 0;
-  for (size_t i = 0; i < n; i += 3) {
-    unsigned b0 = (unsigned char)s[i];
-    unsigned b1 = (i + 1 < n) ? (unsigned char)s[i + 1] : 0;
-    unsigned b2 = (i + 2 < n) ? (unsigned char)s[i + 2] : 0;
+  for (size_t k = 0; k < m; k += 3) {
+    unsigned b0 = bin[k];
+    unsigned b1 = (k + 1 < m) ? bin[k + 1] : 0;
+    unsigned b2 = (k + 2 < m) ? bin[k + 2] : 0;
     o[j++] = B64_ENC[b0 >> 2];
     o[j++] = B64_ENC[((b0 & 3) << 4) | (b1 >> 4)];
-    o[j++] = (i + 1 < n) ? B64_ENC[((b1 & 15) << 2) | (b2 >> 6)] : '=';
-    o[j++] = (i + 2 < n) ? B64_ENC[b2 & 63] : '=';
+    o[j++] = (k + 1 < m) ? B64_ENC[((b1 & 15) << 2) | (b2 >> 6)] : '=';
+    o[j++] = (k + 2 < m) ? B64_ENC[b2 & 63] : '=';
   }
   o[outlen] = 0;
+  free(bin);
   return o;
 }
 
-static int b64_val(char c) {
+static int b64_val(unsigned char c) {
   if (c >= 'A' && c <= 'Z') return c - 'A';
   if (c >= 'a' && c <= 'z') return c - 'a' + 26;
   if (c >= '0' && c <= '9') return c - '0' + 52;
   if (c == '+') return 62;
   if (c == '/') return 63;
-  return -1; /* '=' , whitespace, or invalid — skipped */
+  return -1; /* NOT skipped any more — this is what makes the input invalid */
 }
 
+/* The five ASCII whitespace code points the WHATWG infra spec strips, and only
+ * those. VT (0x0B) is NOT one of them — node throws on `atob("YQ==")`. */
+static int b64_space(unsigned char c) {
+  return c == 0x09 || c == 0x0A || c == 0x0C || c == 0x0D || c == 0x20;
+}
+
+/* WHATWG "forgiving-base64 decode". Ours used to skip every non-alphabet byte,
+ * so `atob("YQ===")` returned "a" and `atob("!!!!")` returned "" where node
+ * throws — untrusted input decoding to a plausible answer at exit 0.
+ *
+ * The order of the two failures is node's, not the spec's literal step order:
+ * the spec returns one undifferentiated failure, and node reports a stray `=`
+ * (`"YQ==="`, `"A==="`) as "Invalid character" even though its length ALSO
+ * leaves a remainder of 1 — so the alphabet check runs first and only an
+ * all-alphabet string of length %4 == 1 (`"Y"`, `"AAAAA"`) gets the length
+ * message. Verified against node 24 for both. */
 const char *nt_atob(const char *s) {
-  size_t n = strlen(s);
-  char *o = alloc_str(n); /* decoded length is always <= encoded length */
-  size_t j = 0;
-  int quad[4], qi = 0;
-  for (size_t i = 0; i < n; i++) {
-    int v = b64_val(s[i]);
-    if (v < 0) continue;
-    quad[qi++] = v;
-    if (qi == 4) {
-      o[j++] = (char)((quad[0] << 2) | (quad[1] >> 4));
-      o[j++] = (char)(((quad[1] & 15) << 4) | (quad[2] >> 2));
-      o[j++] = (char)(((quad[2] & 3) << 6) | quad[3]);
-      qi = 0;
+  size_t n = nt_strlen(s);
+  const unsigned char *u = (const unsigned char *)s;
+  unsigned char *in = (unsigned char *)nativets_alloc(n + 1);
+  size_t m = 0;
+  for (size_t i = 0; i < n; i++) if (!b64_space(u[i])) in[m++] = u[i];
+  /* Trailing padding is removed only from a well-sized string; that is why
+   * `"AA=="` decodes and `"A==="` (which strips to `"A="`) does not. */
+  if (m % 4 == 0) for (int p = 0; p < 2 && m > 0 && in[m - 1] == '='; p++) m--;
+  for (size_t i = 0; i < m; i++) {
+    if (b64_val(in[i]) < 0) {
+      free(in);
+      nt_exc_raise_msg(B64_ERR_CHAR);
+      return nt_empty_str();
     }
   }
-  if (qi >= 2) {
-    o[j++] = (char)((quad[0] << 2) | (quad[1] >> 4));
-    if (qi >= 3) o[j++] = (char)(((quad[1] & 15) << 4) | (quad[2] >> 2));
+  if (m % 4 == 1) {
+    free(in);
+    nt_exc_raise_msg(B64_ERR_LEN);
+    return nt_empty_str();
+  }
+  /* Each decoded byte is a code point, so it costs up to TWO UTF-8 bytes out —
+   * `atob("/w==")` is U+00FF, which node prints as C3 BF and we used to print as
+   * the bare FF, i.e. as stdout that is not valid UTF-8 at all. */
+  char *o = alloc_str(2 * m + 2);
+  size_t j = 0;
+  for (size_t i = 0; i + 1 < m; i += 4) {
+    unsigned v0 = (unsigned)b64_val(in[i]), v1 = (unsigned)b64_val(in[i + 1]);
+    unsigned v2 = (i + 2 < m) ? (unsigned)b64_val(in[i + 2]) : 0;
+    unsigned v3 = (i + 3 < m) ? (unsigned)b64_val(in[i + 3]) : 0;
+    unsigned bytes[3];
+    bytes[0] = ((v0 << 2) | (v1 >> 4)) & 0xFF;
+    bytes[1] = (((v1 & 15) << 4) | (v2 >> 2)) & 0xFF;
+    bytes[2] = (((v2 & 3) << 6) | v3) & 0xFF;
+    /* A remainder of 2 carries one byte and a remainder of 3 carries two; the
+     * leftover low bits of the last symbol are DISCARDED, not required to be
+     * zero (node decodes "YR==" to "a" exactly as it decodes "YQ=="). */
+    size_t take = (i + 3 < m) ? 3 : (i + 2 < m ? 2 : 1);
+    for (size_t k = 0; k < take; k++) {
+      unsigned b = bytes[k];
+      if (b < 0x80) { o[j++] = (char)b; }
+      else { o[j++] = (char)(0xC0 | (b >> 6)); o[j++] = (char)(0x80 | (b & 0x3F)); }
+    }
   }
   o[j] = 0;
+  free(in);
   return o;
 }
 
