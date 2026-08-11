@@ -2471,13 +2471,22 @@ class Parser {
     const tmp = this.freshTmp();
     //@@mutable
     const decls: Declarator[] = [{ name: tmp, init }];
-    elems.forEach((el, i) => {
-      if (el.name === null) return; // elision hole — no binding
+    // A for-of with an explicit positional index rather than `.forEach((el, i) =>`: an
+    // early `return` inside an INLINED ARROW does not narrow the rest of that body (the
+    // same guard as `continue` in a loop body does), so `el.name` stayed `string | null`
+    // here and the push was NT2001 in the subset this file must compile in. Behavior is
+    // identical — an elision hole still consumes an index, which is why `i` advances
+    // before the guard rather than after it.
+    let idx = 0;
+    for (const el of elems) {
+      const i = idx;
+      idx++;
+      if (el.name === null) continue; // elision hole — no binding
       const init: Expr = el.rest
         ? { kind: "CallExpr", callee: { kind: "MemberExpr", object: this.ident(tmp), property: "slice" }, args: [{ kind: "NumberLiteral", value: i }] }
         : { kind: "IndexExpr", object: this.ident(tmp), index: { kind: "NumberLiteral", value: i } };
       decls.push({ name: el.name, init });
-    });
+    }
     return { kind: "VarDecl", declKind, decls };
   }
 
@@ -3260,10 +3269,16 @@ class Parser {
       const tmp = this.freshTmp();
       //@@mutable
       const stmts: Stmt[] = [{ kind: "VarDecl", declKind: "const", decls: [{ name: tmp, init: rhs }] }];
-      pattern.elements.forEach((el, i) => {
+      // for-of, not `.forEach((el, i) =>` — see the note in `parseArrayDestructure`: an
+      // early exit inside an inlined arrow does not narrow the body after it, so the
+      // `kind !== "Identifier"` throw left `el` un-narrowed and `el.name` was NT2001.
+      let idx = 0;
+      for (const el of pattern.elements) {
+        const i = idx;
+        idx++;
         if (el.kind !== "Identifier") throw parseError("array assignment pattern must be identifiers");
         stmts.push({ kind: "ExprStmt", expr: { kind: "AssignExpr", op: "=", target: el.name, value: { kind: "IndexExpr", object: this.ident(tmp), index: { kind: "NumberLiteral", value: i } } } });
-      });
+      }
       return { kind: "MultiStmt", stmts };
     }
     this.eat(";");
