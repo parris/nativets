@@ -896,6 +896,33 @@ interface PendingExit {
  * list, which node answers `undefined` and this compiler PANICS on by design (Stage 41,
  * test/no-index-last.test.ts).
  */
+/**
+ * Every name any `BlockDrops` marker inside `body` can name — the exact set a drop or a
+ * jump-unwind may ever pass to `nt_arr_free`/`nt_obj_free` in this frame.
+ *
+ * Used to decide which entry allocas must be NULL-initialised. Only these can be freed,
+ * so zero-initialising the rest costs instructions on every program and buys nothing:
+ * a first attempt that null-initialised every `ptr` local moved corpus IR +3.76%.
+ */
+function droppableNames(body: Stmt[]): Set<string> {
+  const out = new Set<string>();
+  const walk = (n: unknown): void => {
+    if (Array.isArray(n)) {
+      for (const name of dropsOf(n as Stmt[])) out.add(name);
+      for (const x of n) walk(x);
+      return;
+    }
+    if (n === null || typeof n !== "object") return;
+    // Do NOT descend into a nested function or arrow: those are separate frames with
+    // their own allocas, and their names are not this frame's to initialise.
+    const k = (n as { kind?: string }).kind;
+    if (k === "FuncDecl" || k === "ArrowFunction") return;
+    for (const v of Object.values(n as Record<string, unknown>)) walk(v);
+  };
+  walk(body);
+  return out;
+}
+
 function dropsOf(list: Stmt[]): string[] {
   const n = list.length;
   if (n === 0) return [];
@@ -1240,6 +1267,8 @@ class FnGen {
    * does; this stack is read only by `break`/`continue`.
    */
   private blockScopes: string[][] = [];
+  /** Names some `BlockDrops` in THIS frame can free — see `droppableNames` and `alloca`. */
+  private droppable: Set<string> = new Set();
   /** In a lifted arrow: captured var name -> its slot in the closure env (%__clo). */
   private captures = new Map<string, { index: number; ty: Ty }>();
   /** Is `name` a user-bound local/param/capture (so a `Foo.bar` isn't a builtin namespace)? */
@@ -1406,6 +1435,19 @@ class FnGen {
   private label(h: string): string { return `${h}${this.lbl++}`; }
   private alloca(name: string, ty: Ty): void {
     this.entryAllocas.push(`%${name}.addr = alloca ${llvmTy(ty)}`);
+    // NULL-INITIALISE a slot a drop can reach. `emitJumpDrops` rests on "the pointer IS
+    // the drop flag", which held only for a slot whose declaration had already executed:
+    // a `break`/`continue` BEFORE a later declaration in the same block unwinds that
+    // block's whole `BlockDrops` list and freed an alloca never stored to — stack
+    // garbage. `AddressSanitizer: BUS in nt_arr_free`, exit 134 with empty stdout AND
+    // stderr, on a shape as ordinary as `for (const l of lines) { if (…) continue;
+    // const f = [l]; … }` (examples/csv.ts).
+    //
+    // Restricted to names some `BlockDrops` actually mentions: null-initialising every
+    // `ptr` local instead moved corpus IR +3.76% for a fix that needs only these.
+    if (llvmTy(ty) === "ptr" && this.droppable.has(name)) {
+      this.entryAllocas.push(`store ptr null, ptr %${name}.addr`);
+    }
   }
   private slot(ty: Ty): string {
     const name = `s${this.lbl++}`;
@@ -1483,6 +1525,7 @@ class FnGen {
     this.varTypes = new Map();
     this.loops = [];
     this.blockScopes = [];
+    this.droppable = new Set();
     this.captures = new Map();
     this.tryHandlers = [];
     this.finallyStack = [];
@@ -1561,7 +1604,24 @@ class FnGen {
    * reached the move. That leaks exactly as it did before this existed.
    */
   private emitJumpDrops(depth: number): void {
-    for (let i = this.blockScopes.length - 1; i >= depth; i--) this.emitDrops(this.blockScopes[i] ?? []);
+    for (let i = this.blockScopes.length - 1; i >= depth; i--) {
+      // ONLY names whose declaration has already been GENERATED. `frameLocals` is filled
+      // by `addLocal` as each declaration is lowered, and `genStmts` walks in source
+      // order, so at a jump it holds exactly the names live on this path.
+      //
+      // Without this, a `break`/`continue` placed BEFORE a later declaration in the same
+      // block unwound that block's whole `BlockDrops` list and freed an alloca that had
+      // never been stored to — stack garbage. `AddressSanitizer: BUS in nt_arr_free`,
+      // exit 134 with empty stdout AND stderr, on a shape as ordinary as
+      // `for (const l of lines) { if (l.length === 0) continue; const f = [l]; … }`
+      // (examples/csv.ts). The claim the unwinder rests on — that it "frees exactly what
+      // the fall-through out of the same block would have freed" — is true only of the
+      // fall-through path, which by definition has run every declaration.
+      //
+      // The second iteration of a loop is covered by `emitDrops` nulling each slot after
+      // freeing it: the name IS in `frameLocals` by then, but the slot reads null.
+      this.emitDrops(this.blockScopes[i] ?? []);
+    }
   }
 
   /** Drops for the snapshot scopes `[low, high)`, innermost first — the segment of a
@@ -1705,6 +1765,12 @@ class FnGen {
       const dropTy = this.varTypes.get(n) ?? "number";
       const free = isObjectTy(dropTy) || isUnionTy(dropTy) || isTypeRefTy(dropTy) || isFuncTy(dropTy) ? "nt_obj_free" : "nt_arr_free"; // a union IS an object block (SH2); so is a recursive node, and so is a closure env
       this.emit(`call void @${free}(ptr ${p})`);
+      // NULL THE SLOT. Without this the flag is one-shot: a loop body that frees on
+      // fall-through and then `continue`s from an EARLIER point on the next iteration
+      // unwinds the same scope again and frees the pointer twice. Dead on the paths where
+      // the scope really is ending — LLVM drops those stores — and load-bearing on every
+      // path a jump can re-enter.
+      this.emit(`store ptr null, ptr ${this.addr(n)}`);
     }
   }
 
@@ -1909,6 +1975,7 @@ class FnGen {
 
   genFunction(fn: FuncDecl): string {
     this.reset();
+    this.droppable = droppableNames(fn.body);
     this.canEscape = this.mod.escaping.has(fn.name);
     const sig = this.mod.functions.get(fn.name)!;
     // The RESOLVED return type comes from the signature table, which is where the checker
@@ -1966,6 +2033,7 @@ class FnGen {
 
   genMain(body: Stmt[], endDrops: string[]): string {
     this.reset();
+    this.droppable = droppableNames(body);
     this.retTy = "number";
     this.inMain = true;
     // `main` owns the module-level declarations, so its storage for them IS the global.

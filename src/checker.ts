@@ -8405,8 +8405,14 @@ function checkDefiniteAssignment(body: Stmt[]): void {
       // second, weaker control-flow model of its own.
       const fn = node as FuncDecl;
       const fields = n.kind === "FuncDecl" ? daCtorFieldTys(fn) : new Map<string, Ty | "unknown">();
-      const tracked = new Map<string, Ty | "unknown">();
-      for (const f of fields.keys()) tracked.set(daField(f), fields.get(f) ?? "unknown");
+      // `tracked = tracked.set(…)`, not `tracked.set(…)` — the rule `daCtorFieldTys`
+      // above states and follows: `Map` is PERSISTENT in the subset `src/` must stay
+      // inside, so the bare call returns a new map and leaves the receiver untouched.
+      // Under bun the two spell the same thing, which is exactly why the census lint
+      // (test/discarded-mutator.test.ts) is the only instrument that catches it — a
+      // self-hosted build would have walked an EMPTY tracked set and refused nothing.
+      let tracked = new Map<string, Ty | "unknown">();
+      for (const f of fields.keys()) tracked = tracked.set(daField(f), fields.get(f) ?? "unknown");
       const flow = new Set<string>();
       const esc = { breaks: [] as DAFlow[], conts: [] as DAFlow[], rets: [] as DAFlow[] };
       const exit = daBlock(nested as Stmt[], tracked, flow, esc);

@@ -397,8 +397,10 @@ L0:
   call void @nt_user_main()
   %t15 = load ptr, ptr @nt.g.twice
   call void @nt_obj_free(ptr %t15)
+  store ptr null, ptr @nt.g.twice
   %t16 = load ptr, ptr @nt.g.inc
   call void @nt_obj_free(ptr %t16)
+  store ptr null, ptr @nt.g.inc
   ret i32 0
 }
 "
@@ -734,6 +736,7 @@ L0:
   %t13 = call double %t12(ptr %t9)
   %t14 = load ptr, ptr %main.addr
   call void @nt_obj_free(ptr %t14)
+  store ptr null, ptr %main.addr
   ret i32 0
 }
 "
@@ -1129,6 +1132,7 @@ L0:
   call void @nt_user_main()
   %t9 = load ptr, ptr @nt.g.callitArrow
   call void @nt_obj_free(ptr %t9)
+  store ptr null, ptr @nt.g.callitArrow
   ret i32 0
 }
 "
@@ -1557,6 +1561,7 @@ L0:
   call void @js_print_newline()
   %t17 = load ptr, ptr %acc.addr
   call void @nt_obj_free(ptr %t17)
+  store ptr null, ptr %acc.addr
   ret i32 0
 }
 "
@@ -1878,8 +1883,10 @@ L0:
   call void @js_print_newline()
   %t17 = load ptr, ptr %a.addr
   call void @nt_obj_free(ptr %t17)
+  store ptr null, ptr %a.addr
   %t18 = load ptr, ptr %b.addr
   call void @nt_obj_free(ptr %t18)
+  store ptr null, ptr %b.addr
   ret i32 0
 }
 "
@@ -2161,6 +2168,7 @@ L0:
   %t4 = inttoptr i64 %t3 to ptr
   %t5 = load ptr, ptr %e.addr
   call void @nt_obj_free(ptr %t5)
+  store ptr null, ptr %e.addr
   %rc6 = call ptr @nt_str_retain(ptr %t4)
   ret ptr %t4
 }
@@ -2210,6 +2218,7 @@ L0:
   call void @js_print_newline()
   %t11 = load ptr, ptr %e.addr
   call void @nt_obj_free(ptr %t11)
+  store ptr null, ptr %e.addr
   ret i32 0
 }
 "
@@ -2599,6 +2608,7 @@ L0:
   call void @js_print_newline()
   %t25 = load ptr, ptr %c.addr
   call void @nt_obj_free(ptr %t25)
+  store ptr null, ptr %c.addr
   ret i32 0
 }
 "
@@ -2976,6 +2986,7 @@ L0:
   call void @js_print_newline()
   %t18 = load ptr, ptr %c.addr
   call void @nt_obj_free(ptr %t18)
+  store ptr null, ptr %c.addr
   ret i32 0
 }
 "
@@ -3355,6 +3366,7 @@ L0:
   call void @js_print_newline()
   %t15 = load ptr, ptr %g.addr
   call void @nt_obj_free(ptr %t15)
+  store ptr null, ptr %g.addr
   ret i32 0
 }
 "
@@ -3780,6 +3792,7 @@ endof5:
   call void @js_print_newline()
   %t35 = load ptr, ptr %boxes.addr
   call void @nt_arr_free(ptr %t35)
+  store ptr null, ptr %boxes.addr
   ret i32 0
 }
 "
@@ -4152,6 +4165,7 @@ L0:
   call void @js_print_newline()
   %t9 = load ptr, ptr %b.addr
   call void @nt_obj_free(ptr %t9)
+  store ptr null, ptr %b.addr
   ret i32 0
 }
 "
@@ -4714,8 +4728,10 @@ ie39:
   call void @js_print_newline()
   %t94 = load ptr, ptr %a.addr
   call void @nt_obj_free(ptr %t94)
+  store ptr null, ptr %a.addr
   %t95 = load ptr, ptr %f.addr
   call void @nt_obj_free(ptr %t95)
+  store ptr null, ptr %f.addr
   ret i32 0
 }
 "
@@ -5087,6 +5103,7 @@ L0:
   call void @js_print_newline()
   %t15 = load ptr, ptr %p.addr
   call void @nt_obj_free(ptr %t15)
+  store ptr null, ptr %p.addr
   ret i32 0
 }
 "
@@ -6289,10 +6306,13 @@ L0:
   call void @js_print_newline()
   %t19 = load ptr, ptr %o.addr
   call void @nt_obj_free(ptr %t19)
+  store ptr null, ptr %o.addr
   %t20 = load ptr, ptr %p.addr
   call void @nt_obj_free(ptr %t20)
+  store ptr null, ptr %p.addr
   %t21 = load ptr, ptr %q.addr
   call void @nt_obj_free(ptr %t21)
+  store ptr null, ptr %q.addr
   ret i32 0
 }
 "
@@ -7015,6 +7035,7 @@ L0:
   call void @js_print_newline()
   %t13 = load ptr, ptr %xs.addr
   call void @nt_arr_free(ptr %t13)
+  store ptr null, ptr %xs.addr
   ret i32 0
 }
 "
@@ -7339,6 +7360,7 @@ L0:
   call void @js_print_newline()
   %t7 = load ptr, ptr %data.addr
   call void @nt_arr_free(ptr %t7)
+  store ptr null, ptr %data.addr
   ret i32 0
 }
 "
@@ -7671,8 +7693,10 @@ L0:
   call void @js_print_newline()
   %t27 = load ptr, ptr %identity.addr
   call void @nt_obj_free(ptr %t27)
+  store ptr null, ptr %identity.addr
   %t28 = load ptr, ptr %dup.addr
   call void @nt_obj_free(ptr %t28)
+  store ptr null, ptr %dup.addr
   ret i32 0
 }
 "
@@ -8533,8 +8557,10 @@ L0:
   call void @js_print_newline()
   %t34 = load ptr, ptr %ns.addr
   call void @nt_arr_free(ptr %t34)
+  store ptr null, ptr %ns.addr
   %t35 = load ptr, ptr %ws.addr
   call void @nt_arr_free(ptr %t35)
+  store ptr null, ptr %ws.addr
   ret i32 0
 }
 "
@@ -8923,6 +8949,7 @@ nce4:
   call void @js_print_newline()
   %t57 = load ptr, ptr %nested.addr
   call void @nt_arr_free(ptr %t57)
+  store ptr null, ptr %nested.addr
   ret i32 0
 }
 "
@@ -14355,8 +14382,10 @@ L0:
   call void @js_print_newline()
   %t43 = load ptr, ptr %add.addr
   call void @nt_obj_free(ptr %t43)
+  store ptr null, ptr %add.addr
   %t44 = load ptr, ptr %g.addr
   call void @nt_obj_free(ptr %t44)
+  store ptr null, ptr %g.addr
   ret i32 0
 }
 "
@@ -15015,6 +15044,7 @@ L0:
   call void @js_print_newline()
   %t13 = load ptr, ptr %nums.addr
   call void @nt_arr_free(ptr %t13)
+  store ptr null, ptr %nums.addr
   ret i32 0
 }
 "
@@ -15411,12 +15441,16 @@ L0:
   call void @js_print_newline()
   %t63 = load ptr, ptr %__d0.addr
   call void @nt_arr_free(ptr %t63)
+  store ptr null, ptr %__d0.addr
   %t64 = load ptr, ptr %rest.addr
   call void @nt_arr_free(ptr %t64)
+  store ptr null, ptr %rest.addr
   %t65 = load ptr, ptr %__d1.addr
   call void @nt_obj_free(ptr %t65)
+  store ptr null, ptr %__d1.addr
   %t66 = load ptr, ptr %__d2.addr
   call void @nt_obj_free(ptr %t66)
+  store ptr null, ptr %__d2.addr
   %t67 = load ptr, ptr %name.addr
   call void @nt_str_release(ptr %t67)
   ret i32 0
@@ -15805,14 +15839,19 @@ L0:
   call void @js_print_newline()
   %t57 = load ptr, ptr %a.addr
   call void @nt_arr_free(ptr %t57)
+  store ptr null, ptr %a.addr
   %t58 = load ptr, ptr %b.addr
   call void @nt_arr_free(ptr %t58)
+  store ptr null, ptr %b.addr
   %t59 = load ptr, ptr %args.addr
   call void @nt_arr_free(ptr %t59)
+  store ptr null, ptr %args.addr
   %t60 = load ptr, ptr %base.addr
   call void @nt_obj_free(ptr %t60)
+  store ptr null, ptr %base.addr
   %t61 = load ptr, ptr %merged.addr
   call void @nt_obj_free(ptr %t61)
+  store ptr null, ptr %merged.addr
   ret i32 0
 }
 "
@@ -16224,6 +16263,7 @@ L0:
   call void @js_print_newline()
   %t62 = load ptr, ptr %data.addr
   call void @nt_obj_free(ptr %t62)
+  store ptr null, ptr %data.addr
   ret i32 0
 }
 "
@@ -17029,6 +17069,7 @@ define ptr @risky(double %n) {
 entry:
   %n.addr = alloca double
   %e.addr = alloca ptr
+  store ptr null, ptr %e.addr
   %s4 = alloca double
   %s5 = alloca ptr
   br label %L0
@@ -17506,6 +17547,7 @@ L0:
   call void @js_print_newline()
   %t43 = load ptr, ptr %compose.addr
   call void @nt_obj_free(ptr %t43)
+  store ptr null, ptr %compose.addr
   ret i32 0
 }
 "
@@ -17802,6 +17844,7 @@ endtry2:
 define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %e.addr = alloca ptr
+  store ptr null, ptr %e.addr
   %s4 = alloca double
   %s5 = alloca double
   %s10 = alloca double
@@ -17842,6 +17885,7 @@ catch7:
   call void @js_print_newline()
   %t10 = load ptr, ptr %e.addr
   call void @nt_obj_free(ptr %t10)
+  store ptr null, ptr %e.addr
   store double 0x0000000000000000, ptr %s10
   br label %finally9
 finally9:
@@ -20107,12 +20151,16 @@ cont36:
   call void @js_print_newline()
   %t96 = load ptr, ptr %a.addr
   call void @nt_arr_free(ptr %t96)
+  store ptr null, ptr %a.addr
   %t97 = load ptr, ptr %e.addr
   call void @nt_arr_free(ptr %t97)
+  store ptr null, ptr %e.addr
   %t98 = load ptr, ptr %g.addr
   call void @nt_arr_free(ptr %t98)
+  store ptr null, ptr %g.addr
   %t99 = load ptr, ptr %ps.addr
   call void @nt_arr_free(ptr %t99)
+  store ptr null, ptr %ps.addr
   ret i32 0
 }
 "
@@ -21866,12 +21914,16 @@ cont16:
   call void @js_print_newline()
   %t118 = load ptr, ptr %p.addr
   call void @nt_obj_free(ptr %t118)
+  store ptr null, ptr %p.addr
   %t119 = load ptr, ptr %q.addr
   call void @nt_obj_free(ptr %t119)
+  store ptr null, ptr %q.addr
   %t120 = load ptr, ptr %c.addr
   call void @nt_obj_free(ptr %t120)
+  store ptr null, ptr %c.addr
   %t121 = load ptr, ptr %u.addr
   call void @nt_obj_free(ptr %t121)
+  store ptr null, ptr %u.addr
   ret i32 0
 }
 "
@@ -22900,6 +22952,7 @@ cont11:
   call void @js_print_newline()
   %t47 = load ptr, ptr %obj.addr
   call void @nt_obj_free(ptr %t47)
+  store ptr null, ptr %obj.addr
   %t48 = load ptr, ptr %s.addr
   call void @nt_str_release(ptr %t48)
   ret i32 0
@@ -23213,6 +23266,7 @@ pe5:
   call void @js_print_newline()
   %t18 = load ptr, ptr %o.addr
   call void @nt_obj_free(ptr %t18)
+  store ptr null, ptr %o.addr
   ret i32 0
 }
 "
@@ -23499,6 +23553,7 @@ L0:
   call void @js_print_newline()
   %t6 = load ptr, ptr %o.addr
   call void @nt_obj_free(ptr %t6)
+  store ptr null, ptr %o.addr
   ret i32 0
 }
 "
@@ -23809,6 +23864,7 @@ pe5:
   call void @js_print_newline()
   %t17 = load ptr, ptr %o.addr
   call void @nt_obj_free(ptr %t17)
+  store ptr null, ptr %o.addr
   ret i32 0
 }
 "
@@ -24120,6 +24176,7 @@ pe5:
   call void @js_print_newline()
   %t18 = load ptr, ptr %o.addr
   call void @nt_obj_free(ptr %t18)
+  store ptr null, ptr %o.addr
   ret i32 0
 }
 "
@@ -25479,6 +25536,7 @@ L0:
   call void @js_print_newline()
   %t13 = load ptr, ptr %o.addr
   call void @nt_obj_free(ptr %t13)
+  store ptr null, ptr %o.addr
   ret i32 0
 }
 "
@@ -25819,6 +25877,7 @@ pe9:
   call void @js_print_newline()
   %t34 = load ptr, ptr %o.addr
   call void @nt_obj_free(ptr %t34)
+  store ptr null, ptr %o.addr
   ret i32 0
 }
 "
@@ -26450,6 +26509,7 @@ L0:
   call void @js_print_newline()
   %t19 = load ptr, ptr %o.addr
   call void @nt_obj_free(ptr %t19)
+  store ptr null, ptr %o.addr
   ret i32 0
 }
 "
@@ -26811,6 +26871,7 @@ pe10:
   call void @js_print_newline()
   %t50 = load ptr, ptr %o.addr
   call void @nt_obj_free(ptr %t50)
+  store ptr null, ptr %o.addr
   ret i32 0
 }
 "
@@ -27215,8 +27276,10 @@ nce16:
   call void @js_print_newline()
   %t74 = load ptr, ptr %o.addr
   call void @nt_obj_free(ptr %t74)
+  store ptr null, ptr %o.addr
   %t75 = load ptr, ptr %p.addr
   call void @nt_obj_free(ptr %t75)
+  store ptr null, ptr %p.addr
   ret i32 0
 }
 "
@@ -27659,8 +27722,10 @@ nce24:
   call void @js_print_newline()
   %t88 = load ptr, ptr %o.addr
   call void @nt_obj_free(ptr %t88)
+  store ptr null, ptr %o.addr
   %t89 = load ptr, ptr %p.addr
   call void @nt_obj_free(ptr %t89)
+  store ptr null, ptr %p.addr
   ret i32 0
 }
 "
@@ -28001,8 +28066,10 @@ nce8:
   call void @js_print_newline()
   %t37 = load ptr, ptr %o.addr
   call void @nt_obj_free(ptr %t37)
+  store ptr null, ptr %o.addr
   %t38 = load ptr, ptr %p.addr
   call void @nt_obj_free(ptr %t38)
+  store ptr null, ptr %p.addr
   ret i32 0
 }
 "
@@ -28348,8 +28415,10 @@ nce8:
   call void @js_print_newline()
   %t37 = load ptr, ptr %o.addr
   call void @nt_obj_free(ptr %t37)
+  store ptr null, ptr %o.addr
   %t38 = load ptr, ptr %t.addr
   call void @nt_obj_free(ptr %t38)
+  store ptr null, ptr %t.addr
   ret i32 0
 }
 "
@@ -29163,8 +29232,10 @@ L0:
   call void @js_print_newline()
   %t35 = load ptr, ptr %o.addr
   call void @nt_obj_free(ptr %t35)
+  store ptr null, ptr %o.addr
   %t36 = load ptr, ptr %p.addr
   call void @nt_obj_free(ptr %t36)
+  store ptr null, ptr %p.addr
   ret i32 0
 }
 "
@@ -29483,10 +29554,13 @@ L0:
   call void @js_print_newline()
   %t24 = load ptr, ptr %v0.addr
   call void @nt_arr_free(ptr %t24)
+  store ptr null, ptr %v0.addr
   %t25 = load ptr, ptr %v1.addr
   call void @nt_arr_free(ptr %t25)
+  store ptr null, ptr %v1.addr
   %t26 = load ptr, ptr %v2.addr
   call void @nt_arr_free(ptr %t26)
+  store ptr null, ptr %v2.addr
   ret i32 0
 }
 "
@@ -29805,8 +29879,10 @@ L0:
   call void @js_print_newline()
   %t23 = load ptr, ptr %a.addr
   call void @nt_arr_free(ptr %t23)
+  store ptr null, ptr %a.addr
   %t24 = load ptr, ptr %b.addr
   call void @nt_arr_free(ptr %t24)
+  store ptr null, ptr %b.addr
   ret i32 0
 }
 "
@@ -30130,8 +30206,10 @@ L0:
   call void @js_print_newline()
   %t25 = load ptr, ptr %a.addr
   call void @nt_arr_free(ptr %t25)
+  store ptr null, ptr %a.addr
   %t26 = load ptr, ptr %b.addr
   call void @nt_arr_free(ptr %t26)
+  store ptr null, ptr %b.addr
   ret i32 0
 }
 "
@@ -32242,6 +32320,7 @@ endof5:
   call void @js_print_newline()
   %t48 = load ptr, ptr %pts.addr
   call void @nt_arr_free(ptr %t48)
+  store ptr null, ptr %pts.addr
   ret i32 0
 }
 "
@@ -33498,16 +33577,22 @@ jse47:
   call void @js_print_newline()
   %t543 = load ptr, ptr %p.addr
   call void @nt_obj_free(ptr %t543)
+  store ptr null, ptr %p.addr
   %t544 = load ptr, ptr %n.addr
   call void @nt_obj_free(ptr %t544)
+  store ptr null, ptr %n.addr
   %t545 = load ptr, ptr %b.addr
   call void @nt_obj_free(ptr %t545)
+  store ptr null, ptr %b.addr
   %t546 = load ptr, ptr %f.addr
   call void @nt_obj_free(ptr %t546)
+  store ptr null, ptr %f.addr
   %t547 = load ptr, ptr %s1.addr
   call void @nt_obj_free(ptr %t547)
+  store ptr null, ptr %s1.addr
   %t548 = load ptr, ptr %fe.addr
   call void @nt_obj_free(ptr %t548)
+  store ptr null, ptr %fe.addr
   %t549 = load ptr, ptr %acc.addr
   call void @nt_str_release(ptr %t549)
   ret i32 0
@@ -33843,6 +33928,7 @@ L0:
   call void @js_print_newline()
   %t39 = load ptr, ptr %a.addr
   call void @nt_arr_free(ptr %t39)
+  store ptr null, ptr %a.addr
   ret i32 0
 }
 "
@@ -34348,12 +34434,16 @@ mape22:
   call void @js_print_newline()
   %t126 = load ptr, ptr %pts.addr
   call void @nt_arr_free(ptr %t126)
+  store ptr null, ptr %pts.addr
   %t127 = load ptr, ptr %shifted.addr
   call void @nt_arr_free(ptr %t127)
+  store ptr null, ptr %shifted.addr
   %t128 = load ptr, ptr %big.addr
   call void @nt_arr_free(ptr %t128)
+  store ptr null, ptr %big.addr
   %t129 = load ptr, ptr %sums.addr
   call void @nt_arr_free(ptr %t129)
+  store ptr null, ptr %sums.addr
   ret i32 0
 }
 "
@@ -34789,6 +34879,7 @@ ofupd4:
 endof5:
   %t109 = load ptr, ptr %rows.addr
   call void @nt_arr_free(ptr %t109)
+  store ptr null, ptr %rows.addr
   ret i32 0
 }
 "
@@ -35852,10 +35943,13 @@ jse38:
   call void @js_print_newline()
   %t438 = load ptr, ptr %idx.addr
   call void @nt_obj_free(ptr %t438)
+  store ptr null, ptr %idx.addr
   %t439 = load ptr, ptr %f.addr
   call void @nt_obj_free(ptr %t439)
+  store ptr null, ptr %f.addr
   %t440 = load ptr, ptr %r.addr
   call void @nt_obj_free(ptr %t440)
+  store ptr null, ptr %r.addr
   %t441 = load ptr, ptr %acc.addr
   call void @nt_str_release(ptr %t441)
   ret i32 0
@@ -36249,8 +36343,10 @@ rede10:
   call void @js_print_newline()
   %t62 = load ptr, ptr %base.addr
   call void @nt_arr_free(ptr %t62)
+  store ptr null, ptr %base.addr
   %t63 = load ptr, ptr %items.addr
   call void @nt_arr_free(ptr %t63)
+  store ptr null, ptr %items.addr
   ret i32 0
 }
 "
@@ -38193,12 +38289,16 @@ endof5:
   call void @js_print_newline()
   %t44 = load ptr, ptr %a.addr
   call void @nt_arr_free(ptr %t44)
+  store ptr null, ptr %a.addr
   %t45 = load ptr, ptr %s.addr
   call void @nt_arr_free(ptr %t45)
+  store ptr null, ptr %s.addr
   %t46 = load ptr, ptr %m.addr
   call void @nt_arr_free(ptr %t46)
+  store ptr null, ptr %m.addr
   %t47 = load ptr, ptr %grown.addr
   call void @nt_arr_free(ptr %t47)
+  store ptr null, ptr %grown.addr
   ret i32 0
 }
 "
@@ -38761,14 +38861,19 @@ rede41:
   call void @js_print_newline()
   %t112 = load ptr, ptr %nums.addr
   call void @nt_arr_free(ptr %t112)
+  store ptr null, ptr %nums.addr
   %t113 = load ptr, ptr %mapped.addr
   call void @nt_arr_free(ptr %t113)
+  store ptr null, ptr %mapped.addr
   %t114 = load ptr, ptr %kept.addr
   call void @nt_arr_free(ptr %t114)
+  store ptr null, ptr %kept.addr
   %t115 = load ptr, ptr %labels.addr
   call void @nt_arr_free(ptr %t115)
+  store ptr null, ptr %labels.addr
   %t116 = load ptr, ptr %words.addr
   call void @nt_arr_free(ptr %t116)
+  store ptr null, ptr %words.addr
   %t117 = load ptr, ptr %glued.addr
   call void @nt_str_release(ptr %t117)
   %t118 = load ptr, ptr %piece.h4.addr
@@ -39268,14 +39373,19 @@ mape29:
   call void @js_print_newline()
   %t91 = load ptr, ptr %nums.addr
   call void @nt_arr_free(ptr %t91)
+  store ptr null, ptr %nums.addr
   %t92 = load ptr, ptr %words.addr
   call void @nt_arr_free(ptr %t92)
+  store ptr null, ptr %words.addr
   %t93 = load ptr, ptr %inc.addr
   call void @nt_arr_free(ptr %t93)
+  store ptr null, ptr %inc.addr
   %t94 = load ptr, ptr %bang.addr
   call void @nt_arr_free(ptr %t94)
+  store ptr null, ptr %bang.addr
   %t95 = load ptr, ptr %scaled.addr
   call void @nt_arr_free(ptr %t95)
+  store ptr null, ptr %scaled.addr
   %t96 = load ptr, ptr %strCat.addr
   call void @nt_str_release(ptr %t96)
   %t97 = load ptr, ptr %r.h3.addr
@@ -39669,6 +39779,7 @@ jsJ12:
   call void @js_print_newline()
   %t52 = load ptr, ptr %arr.addr
   call void @nt_arr_free(ptr %t52)
+  store ptr null, ptr %arr.addr
   ret i32 0
 }
 "
@@ -40138,10 +40249,13 @@ jsJ24:
   call void @js_print_newline()
   %t81 = load ptr, ptr %o.addr
   call void @nt_obj_free(ptr %t81)
+  store ptr null, ptr %o.addr
   %t82 = load ptr, ptr %emptyArr.addr
   call void @nt_arr_free(ptr %t82)
+  store ptr null, ptr %emptyArr.addr
   %t83 = load ptr, ptr %emptyObj.addr
   call void @nt_obj_free(ptr %t83)
+  store ptr null, ptr %emptyObj.addr
   ret i32 0
 }
 "
@@ -40470,6 +40584,7 @@ L0:
   call void @js_print_newline()
   %t31 = load ptr, ptr %o.addr
   call void @nt_obj_free(ptr %t31)
+  store ptr null, ptr %o.addr
   ret i32 0
 }
 "
@@ -40881,6 +40996,7 @@ jsJ12:
   call void @js_print_newline()
   %t64 = load ptr, ptr %o.addr
   call void @nt_obj_free(ptr %t64)
+  store ptr null, ptr %o.addr
   ret i32 0
 }
 "
@@ -41207,6 +41323,7 @@ L0:
   call void @js_print_newline()
   %t29 = load ptr, ptr %o.addr
   call void @nt_obj_free(ptr %t29)
+  store ptr null, ptr %o.addr
   ret i32 0
 }
 "
@@ -41810,8 +41927,10 @@ jsJ48:
   call void @js_print_newline()
   %t136 = load ptr, ptr %grid.addr
   call void @nt_arr_free(ptr %t136)
+  store ptr null, ptr %grid.addr
   %t137 = load ptr, ptr %mix.addr
   call void @nt_obj_free(ptr %t137)
+  store ptr null, ptr %mix.addr
   ret i32 0
 }
 "
@@ -42244,6 +42363,7 @@ jsJ12:
   call void @js_print_newline()
   %t76 = load ptr, ptr %o.addr
   call void @nt_obj_free(ptr %t76)
+  store ptr null, ptr %o.addr
   ret i32 0
 }
 "
@@ -42732,6 +42852,7 @@ jse24:
   call void @js_print_newline()
   %t101 = load ptr, ptr %o.addr
   call void @nt_obj_free(ptr %t101)
+  store ptr null, ptr %o.addr
   ret i32 0
 }
 "
@@ -45133,10 +45254,13 @@ endof5:
   call void @js_print_newline()
   %t46 = load ptr, ptr %xs.addr
   call void @nt_arr_free(ptr %t46)
+  store ptr null, ptr %xs.addr
   %t47 = load ptr, ptr %ys.addr
   call void @nt_arr_free(ptr %t47)
+  store ptr null, ptr %ys.addr
   %t48 = load ptr, ptr %words.addr
   call void @nt_arr_free(ptr %t48)
+  store ptr null, ptr %words.addr
   ret i32 0
 }
 "
@@ -45534,8 +45658,10 @@ endin5:
   call void @js_print_newline()
   %t67 = load ptr, ptr %p.addr
   call void @nt_obj_free(ptr %t67)
+  store ptr null, ptr %p.addr
   %t68 = load ptr, ptr %o.addr
   call void @nt_obj_free(ptr %t68)
+  store ptr null, ptr %o.addr
   %t69 = load ptr, ptr %ks.addr
   call void @nt_str_release(ptr %t69)
   ret i32 0
@@ -46033,6 +46159,7 @@ rede32:
   call void @js_print_newline()
   %t93 = load ptr, ptr %nums.addr
   call void @nt_arr_free(ptr %t93)
+  store ptr null, ptr %nums.addr
   ret i32 0
 }
 "
@@ -46432,8 +46559,10 @@ nce8:
   call void @js_print_newline()
   %t73 = load ptr, ptr %e.addr
   call void @nt_arr_free(ptr %t73)
+  store ptr null, ptr %e.addr
   %t74 = load ptr, ptr %o.addr
   call void @nt_arr_free(ptr %t74)
+  store ptr null, ptr %o.addr
   ret i32 0
 }
 "
@@ -47339,8 +47468,10 @@ nce26:
   call void @js_print_newline()
   %t152 = load ptr, ptr %hit.addr
   call void @nt_obj_free(ptr %t152)
+  store ptr null, ptr %hit.addr
   %t153 = load ptr, ptr %miss.addr
   call void @nt_obj_free(ptr %t153)
+  store ptr null, ptr %miss.addr
   ret i32 0
 }
 "
@@ -48933,8 +49064,10 @@ nce8:
   call void @js_print_newline()
   %t85 = load ptr, ptr %o.addr
   call void @nt_obj_free(ptr %t85)
+  store ptr null, ptr %o.addr
   %t86 = load ptr, ptr %u.addr
   call void @nt_obj_free(ptr %t86)
+  store ptr null, ptr %u.addr
   ret i32 0
 }
 "
@@ -49977,12 +50110,16 @@ L0:
   call void @js_print_newline()
   %t36 = load ptr, ptr %nums.addr
   call void @nt_arr_free(ptr %t36)
+  store ptr null, ptr %nums.addr
   %t37 = load ptr, ptr %strs.addr
   call void @nt_arr_free(ptr %t37)
+  store ptr null, ptr %strs.addr
   %t38 = load ptr, ptr %chars.addr
   call void @nt_arr_free(ptr %t38)
+  store ptr null, ptr %chars.addr
   %t39 = load ptr, ptr %emoji.addr
   call void @nt_arr_free(ptr %t39)
+  store ptr null, ptr %emoji.addr
   ret i32 0
 }
 "
@@ -51871,12 +52008,16 @@ rede5:
   call void @js_print_newline()
   %t88 = load ptr, ptr %scores.addr
   call void @nt_obj_free(ptr %t88)
+  store ptr null, ptr %scores.addr
   %t89 = load ptr, ptr %vals.addr
   call void @nt_arr_free(ptr %t89)
+  store ptr null, ptr %vals.addr
   %t90 = load ptr, ptr %names.addr
   call void @nt_obj_free(ptr %t90)
+  store ptr null, ptr %names.addr
   %t91 = load ptr, ptr %nv.addr
   call void @nt_arr_free(ptr %t91)
+  store ptr null, ptr %nv.addr
   ret i32 0
 }
 "

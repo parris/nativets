@@ -327,6 +327,7 @@ describe("discarded persistent mutators in src/", () => {
     "checker.ts daStmt: flow.add(…)",
     "checker.ts daStmt: flow.add(…)",
     "checker.ts daStmt: flow.add(…)",
+    "checker.ts daStmt: flow.add(…)",
     "checker.ts daStmt: flow.clear(…)",
     "checker.ts daStmt: flow.clear(…)",
     "checker.ts daStmt: flow.clear(…)",
