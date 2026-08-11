@@ -1112,6 +1112,20 @@ class FnGen {
    * `br label %catchN` with no such block, i.e. invalid IR and a raw clang error.
    */
   private tryHandlers: { catchLbl: string; excVar: string | null; eType: Ty; catchless: boolean }[] = [];
+
+  /**
+   * The innermost enclosing `try`, or null when the handler stack is empty.
+   *
+   * Spelled as a length test rather than `tryHandlers[tryHandlers.length - 1]` because an
+   * EMPTY stack is the ordinary case (a `throw` outside any `try`), and that spelling forms
+   * index -1, which node answers `undefined` and nativets PANICS on by design (Stage 41).
+   * `src/` may not depend on the read; `test/no-index-last.test.ts` scans for the shape and
+   * ratchets it. One helper so the three call sites cannot drift apart.
+   */
+  private innermostHandler(): { catchLbl: string; excVar: string | null; eType: Ty; catchless: boolean } | null {
+    const n = this.tryHandlers.length;
+    return n > 0 ? this.tryHandlers[n - 1]! : null;
+  }
   /** Active finally blocks (a `return` inside runs finally first, mode=1). */
   private finallyStack: { finallyLbl: string; modeSlot: string; retSlot: string | null }[] = [];
   /**
@@ -1931,7 +1945,7 @@ class FnGen {
         // Never index -1: an empty stack is the ordinary case (a `throw` outside any
         // `try`), where node answers `undefined` and nativets PANICS on the read. The
         // `!h` arm below is the one that must stay reachable. See test/tsc.test.ts.
-        const h = this.tryHandlers.length > 0 ? this.tryHandlers[this.tryHandlers.length - 1]! : null;
+        const h = this.innermostHandler();
         // The innermost `try` is `finally`-only: it catches nothing, and its catch block is
         // never emitted. Refuse before anything branches to it. (Not folded into `!h` below:
         // an outer `catch` may exist, and skipping the `finally` on the way to it would drop
@@ -3819,7 +3833,7 @@ class FnGen {
     // then read as an object pointer. That is a silent wrong answer with a ZERO exit code
     // (measured: node "Thrown\nSyntaxError", ours "Thrown\n\xef\xbf\xbd", both exit 0),
     // not a crash and not a diagnostic. Refuse it. Raised BEFORE anything is emitted.
-    const hh = this.tryHandlers.length > 0 ? this.tryHandlers[this.tryHandlers.length - 1]! : null;
+    const hh = this.innermostHandler();
     if (hh !== null && hh.excVar !== null && hh.eType !== "string" && hh.eType !== "{message:string}") {
       throw nyi(NYI.EXCEPTION, `a call that can raise inside a \`try\` whose \`catch (${hh.excVar})\` is ${hh.eType}, which the pending-exception flag cannot rebuild`,
         "a raise crosses a frame on a slot that holds ONE string, so a `catch` binding can only be rebuilt from it as a `string` or as `{message:string}` (what `new Error(msg)` is here) — and this handler binds neither, so the runtime has no value to give it. Move the call that can raise OUT of this `try`, or give the raising code a `try` of its own whose `catch` binds one of those two shapes");
@@ -3833,7 +3847,7 @@ class FnGen {
     this.terminate(`br i1 ${cond}, label %${throwLbl}, label %${contLbl}`);
     this.to(this.block(throwLbl));
     // See the ThrowStmt case above: an empty handler stack must not become index -1.
-    const h = this.tryHandlers.length > 0 ? this.tryHandlers[this.tryHandlers.length - 1]! : null;
+    const h = this.innermostHandler();
     if (h) {
       if (h.excVar && h.eType === "string") {
         const m = this.fresh();

@@ -126,7 +126,7 @@ const UNASSERTED: Record<string, number> = {}; // EMPTY — keep it that way.
  */
 const ASSERTED: Record<string, number> = {
   "checker.ts": 3,
-  "codegen.ts": 8,
+  "codegen.ts": 6,
   "driver.ts": 1,
   "lexer.ts": 2,
   "parser.ts": 2,
