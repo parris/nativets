@@ -1199,10 +1199,32 @@ class Parser {
     if (t.type !== "ident") throw parseError(`Expected identifier at ${t.line}:${t.col}`);
     return this.next().value;
   }
+  /**
+   * A `PropertyName`, as the STRING it names — which for a `NumericLiteral` is not its
+   * source text. ECMA-262 `PropName` of a `NumericLiteral` is `ToString(ToNumber(literal))`,
+   * so `{ 1e3: … }` names the property `"1000"`, `{ 0x10: … }` names `"16"`, and `{ 1.0: … }`
+   * names `"1"`. Returning the token spelling named three properties that do not exist.
+   *
+   * It hid for so long because the CANONICAL spellings — `0`, `1`, `42`, `0.5` — are their
+   * own `ToString(ToNumber(…))`, and those are what a hand-written test reaches for. The
+   * forms that differ are the ones nobody types twice.
+   *
+   * `String(Number(text))` and not a hand-rolled decoder: the lexer keeps radix-prefixed
+   * literals as raw text precisely so this one round trip decodes every form — `0x`/`0b`/`0o`
+   * either case, exponents, a bare trailing `.` — and `Number::toString`'s own switch to
+   * exponential notation (`1e21` → `1e+21`, `1e-7` → `1e-7`) is then node's by construction
+   * rather than by imitation. The `_` separator is already dropped by the lexer, which is
+   * required: `Number("1_000")` is `NaN`.
+   *
+   * The normalized key then feeds the array-index rule (`isArrayIndexKey`), so this fixes
+   * the key's POSITION as well as its name — `1e3` is not an index spelling but `1000` is.
+   * It cannot manufacture a false index: the predicate still tests the canonical spelling,
+   * and `1e-7`/`1.5` canonicalize to forms it rejects.
+   */
   private expectKey(): string {
     const t = this.peek();
     if (t.type === "ident" || t.type === "str") { this.next(); return t.value; }
-    if (t.type === "num") { this.next(); return t.value; }
+    if (t.type === "num") { this.next(); return String(Number(t.value)); }
     throw parseError(`Expected property key at ${t.line}:${t.col}`);
   }
 
