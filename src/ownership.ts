@@ -912,8 +912,7 @@ class Analyzer {
   private arrowScope(list: Stmt[], state: State): void {
     let own = new Set<string>();
     own = collectLinear(list, own);
-    const aliases = new Map<string, string>();
-    collectAliases(list, (t) => this.isMutableInstance(t), aliases);
+    const aliases = collectAliases(list, (t) => this.isMutableInstance(t), new Map<string, string>());
     // Both removals below are spelled as FILTERS, for the reason `popBorrow` documents:
     // `.delete` returns a boolean under node and a new collection here, so no rebind
     // means the same thing in both languages. Neither filter changes a set.
@@ -1990,8 +1989,25 @@ function nonEscapingClosures(list: Stmt[], shadowed: Set<string>): string[] {
  * `nt_obj_free` already leaks by construction (docs/ROADMAP.md, "Why ELEMENTS is not a
  * one-line fix"), so this joins a known list rather than opening a new one, and the
  * project's stated trade is leak-over-dangle.
+ *
+ * RETURNS the accumulator, like its two siblings and for the same reason: `out` is a
+ * PARAMETER both callers read back, and a nativets `Map` is persistent, so the five
+ * in-place `out.set(…)` calls this used to make were guaranteed no-ops here while working
+ * under bun, where `src/` runs today. Fix #2 from test/discarded-mutator.test.ts.
+ *
+ * THIS IS THE ONE WHERE AN EMPTY ANSWER IS A DOUBLE FREE, which is why it is not filed with
+ * the cosmetic dead writes. Everything above describes bindings that must NOT be dropped —
+ * an alias names an allocation someone else owns. `runScope` subtracts this map from
+ * `linear` and `scoped` skips its keys; an unthreaded map subtracts nothing, so both the
+ * alias and the owner become droppable and the one pointer is freed twice. The use-after-
+ * free and the exit-139 segfault quoted above are what that looks like.
+ *
+ * The accumulator is a LOCAL seeded from `out`, never `out` itself — rebinding a parameter
+ * is refused (NT1606, `rejectParamRebind`) exactly because a caller ignoring the return
+ * would silently lose every write.
  */
-function collectAliases(stmts: Stmt[], isMutableTy: (t: Ty) => boolean, out: Map<string, string>, borrowRoots: Set<string> = new Set()): void {
+function collectAliases(stmts: Stmt[], isMutableTy: (t: Ty) => boolean, out: Map<string, string>, borrowRoots: Set<string> = new Set()): Map<string, string> {
+  let acc = out;
   for (const s of stmts) {
     switch (s.kind) {
       case "VarDecl":
@@ -2022,24 +2038,24 @@ function collectAliases(stmts: Stmt[], isMutableTy: (t: Ty) => boolean, out: Map
           // is the existing NT1604. Deliberately NOT gated on `isMutableTy` — the double
           // free it prevents is the plain immutable-object shape.
           const asRoot = assertedPlaceRoot(d.init);
-          if (asRoot !== null) { out.set(d.name, asRoot); continue; }
+          if (asRoot !== null) { acc = acc.set(d.name, asRoot); continue; }
           const retained = retainedReceiver(d.init);
-          if (retained !== null) { out.set(d.name, retained); continue; }
+          if (retained !== null) { acc = acc.set(d.name, retained); continue; }
           // `const b = o.f` / `const b = this.f` on a LINEAR field of a BORROWED receiver:
           // the object owns the field and outlives this scope, so `b` names it rather than
           // taking it. Not `@@mutable`-gated — it is the plain-array shape that dangled.
           const fieldRoot = borrowedFieldRoot(d.init, borrowRoots);
-          if (fieldRoot !== null && isLinearTy(d.ty ?? "number")) { out.set(d.name, fieldRoot); continue; }
+          if (fieldRoot !== null && isLinearTy(d.ty ?? "number")) { acc = acc.set(d.name, fieldRoot); continue; }
           if (!isMutableTy(d.ty ?? "number")) continue;
-          if (d.init.kind === "Identifier") out.set(d.name, d.init.name);
+          if (d.init.kind === "Identifier") acc = acc.set(d.name, d.init.name);
           else if (d.init.kind === "CallExpr" && d.init.callee.kind === "MemberExpr") {
             const base = d.init.callee.object;
-            out.set(d.name, base.kind === "Identifier" ? base.name : "");
+            acc = acc.set(d.name, base.kind === "Identifier" ? base.name : "");
           }
         }
         break;
-      case "IfStmt": collectAliases(s.consequent, isMutableTy, out, borrowRoots); if (s.alternate) collectAliases(s.alternate, isMutableTy, out, borrowRoots); break;
-      case "WhileStmt": case "DoWhileStmt": case "ForInStmt": case "BlockStmt": collectAliases(s.body, isMutableTy, out, borrowRoots); break;
+      case "IfStmt": acc = collectAliases(s.consequent, isMutableTy, acc, borrowRoots); if (s.alternate) acc = collectAliases(s.alternate, isMutableTy, acc, borrowRoots); break;
+      case "WhileStmt": case "DoWhileStmt": case "ForInStmt": case "BlockStmt": acc = collectAliases(s.body, isMutableTy, acc, borrowRoots); break;
       // A `for-of` ELEMENT over a linear element type is a BORROW for the body's extent —
       // the array owns it, exactly as `Analyzer.expr` puts the name in `borrowBindings`
       // there. So `for (const t of toks) { const b = t.parts; }` is the same
@@ -2047,34 +2063,56 @@ function collectAliases(stmts: Stmt[], isMutableTy: (t: Ty) => boolean, out: Map
       // merely printing a wrong answer. Scoped to the body with a fresh set: the name is
       // not a borrow outside the loop.
       case "ForOfStmt":
-        collectAliases(s.body, isMutableTy, out,
+        acc = collectAliases(s.body, isMutableTy, acc,
           isLinearTy(s.elemTy ?? "number") ? new Set<string>([...borrowRoots, s.name]) : borrowRoots);
         break;
-      case "ForStmt": if (s.init && (s.init as Stmt).kind === "VarDecl") collectAliases([s.init as Stmt], isMutableTy, out, borrowRoots); collectAliases(s.body, isMutableTy, out, borrowRoots); break;
-      case "SwitchStmt": for (const c of s.cases) collectAliases(c.body, isMutableTy, out, borrowRoots); break;
-      case "TryStmt": collectAliases(s.block, isMutableTy, out, borrowRoots); if (s.handler) collectAliases(s.handler, isMutableTy, out, borrowRoots); if (s.finalizer) collectAliases(s.finalizer, isMutableTy, out, borrowRoots); break;
-      case "MultiStmt": collectAliases(s.stmts, isMutableTy, out, borrowRoots); break;
+      case "ForStmt": if (s.init && (s.init as Stmt).kind === "VarDecl") acc = collectAliases([s.init as Stmt], isMutableTy, acc, borrowRoots); acc = collectAliases(s.body, isMutableTy, acc, borrowRoots); break;
+      case "SwitchStmt": for (const c of s.cases) acc = collectAliases(c.body, isMutableTy, acc, borrowRoots); break;
+      case "TryStmt": acc = collectAliases(s.block, isMutableTy, acc, borrowRoots); if (s.handler) acc = collectAliases(s.handler, isMutableTy, acc, borrowRoots); if (s.finalizer) acc = collectAliases(s.finalizer, isMutableTy, acc, borrowRoots); break;
+      case "MultiStmt": acc = collectAliases(s.stmts, isMutableTy, acc, borrowRoots); break;
       default: break;
     }
   }
+  return acc;
 }
 
-/** Static type of every name bound in a scope — what the `@@mutable` rules read. */
-function collectVarTys(stmts: Stmt[], out: Map<string, Ty>): void {
+/**
+ * Static type of every name bound in a scope — what the `@@mutable` rules read.
+ *
+ * RETURNS the accumulator, exactly as `collectLinear` below does and for the same reason:
+ * `out` is a PARAMETER the caller reads back, so the in-place `out.set(…)` this used to be
+ * is a guaranteed NO-OP under nativets (a `Map` here is persistent — `.set` answers a new
+ * map and leaves the receiver alone), while under bun, where `src/` runs today, it mutates
+ * and works. Fix #2 from test/discarded-mutator.test.ts, whose spelling is compiled against
+ * node there.
+ *
+ * The accumulator is a LOCAL seeded from `out`, never `out` itself: rebinding the parameter
+ * is refused (`rejectParamRebind`, NT1606) precisely because a caller that ignored the
+ * return would silently lose every write. Every recursive step and the single caller
+ * (`runScope`) thread it.
+ *
+ * WHAT AN EMPTY ANSWER WOULD COST, so the no-op is not mistaken for cosmetic: `varTy` is
+ * what `isMutableInstance` consults, so an unthreaded map makes every binding look
+ * non-`@@mutable` and quietly disables the aliasing rules that keep a mutable instance
+ * single-owner.
+ */
+function collectVarTys(stmts: Stmt[], out: Map<string, Ty>): Map<string, Ty> {
+  let acc = out;
   for (const s of stmts) {
     switch (s.kind) {
-      case "VarDecl": for (const d of s.decls) if (d.ty !== undefined) out.set(d.name, d.ty); break;
-      case "IfStmt": collectVarTys(s.consequent, out); if (s.alternate) collectVarTys(s.alternate, out); break;
-      case "WhileStmt": case "DoWhileStmt": case "BlockStmt": collectVarTys(s.body, out); break;
-      case "ForStmt": if (s.init && (s.init as Stmt).kind === "VarDecl") collectVarTys([s.init as Stmt], out); collectVarTys(s.body, out); break;
-      case "ForOfStmt": if (s.elemTy !== undefined) out.set(s.name, s.elemTy); collectVarTys(s.body, out); break;
-      case "ForInStmt": collectVarTys(s.body, out); break;
-      case "SwitchStmt": for (const c of s.cases) collectVarTys(c.body, out); break;
-      case "TryStmt": collectVarTys(s.block, out); if (s.handler) collectVarTys(s.handler, out); if (s.finalizer) collectVarTys(s.finalizer, out); break;
-      case "MultiStmt": collectVarTys(s.stmts, out); break;
+      case "VarDecl": for (const d of s.decls) if (d.ty !== undefined) acc = acc.set(d.name, d.ty); break;
+      case "IfStmt": acc = collectVarTys(s.consequent, acc); if (s.alternate) acc = collectVarTys(s.alternate, acc); break;
+      case "WhileStmt": case "DoWhileStmt": case "BlockStmt": acc = collectVarTys(s.body, acc); break;
+      case "ForStmt": if (s.init && (s.init as Stmt).kind === "VarDecl") acc = collectVarTys([s.init as Stmt], acc); acc = collectVarTys(s.body, acc); break;
+      case "ForOfStmt": if (s.elemTy !== undefined) acc = acc.set(s.name, s.elemTy); acc = collectVarTys(s.body, acc); break;
+      case "ForInStmt": acc = collectVarTys(s.body, acc); break;
+      case "SwitchStmt": for (const c of s.cases) acc = collectVarTys(c.body, acc); break;
+      case "TryStmt": acc = collectVarTys(s.block, acc); if (s.handler) acc = collectVarTys(s.handler, acc); if (s.finalizer) acc = collectVarTys(s.finalizer, acc); break;
+      case "MultiStmt": acc = collectVarTys(s.stmts, acc); break;
       default: break;
     }
   }
+  return acc;
 }
 
 /*
@@ -2092,21 +2130,36 @@ function collectVarTys(stmts: Stmt[], out: Map<string, Ty>): void {
  * this set came back short.
  *
  * A NO-OP under bun, where `src/` runs today, and that is what makes the change checkable:
- * node's `.add` returns the RECEIVER, so `out = out.add(n)` self-assigns and
- * `out = collectLinear(s.body, out)` re-binds the same object. Byte-identical IR over the
+ * node's `.add` returns the RECEIVER, so `acc = acc.add(n)` self-assigns and
+ * `acc = collectLinear(s.body, acc)` re-binds the same object. Byte-identical IR over the
  * corpus is therefore the expected result, not merely a hoped-for one — any drift would
  * mean a threading mistake.
+ *
+ * THE ACCUMULATOR IS A LOCAL SEEDED FROM `out`, not `out` itself, and that is the half the
+ * return alone did not buy. Returning the set is necessary but not sufficient: `out = out
+ * .add(n)` still writes to a PARAMETER, and the checker refuses that shape outright
+ * (`rejectParamRebind`, NT1606) without looking at whether the function returns it — as it
+ * must, since the rule cannot see the call sites and one caller ignoring the result is the
+ * silent lost update. So this function stayed a self-hosting blocker while already being
+ * correct. `let acc = out` is the spelling NT1606's own hint names, and the hint is now
+ * compiled against node in test/discarded-mutator.test.ts rather than merely asserted.
+ *
+ * Identical under both languages, which is why it is a rename and not a change: under bun
+ * `acc` and `out` are the same object and `.add` mutates it; under nativets `acc` moves and
+ * `out` does not, and every caller reads the RETURN. The two agree at the only place anyone
+ * looks.
  */
 function collectLinear(stmts: Stmt[], out: Set<string>): Set<string> {
+  let acc = out;
   for (const s of stmts) {
     switch (s.kind) {
-      case "VarDecl": for (const d of s.decls) if (isLinearTy(d.ty ?? "number")) out = out.add(d.name); break;
-      case "IfStmt": out = collectLinear(s.consequent, out); if (s.alternate) out = collectLinear(s.alternate, out); break;
-      case "WhileStmt": case "DoWhileStmt": out = collectLinear(s.body, out); break;
-      case "ForStmt": if (s.init && (s.init as Stmt).kind === "VarDecl") out = collectLinear([s.init as Stmt], out); out = collectLinear(s.body, out); break;
-      case "ForOfStmt": out = collectLinear(s.body, out); break;
-      case "SwitchStmt": for (const c of s.cases) out = collectLinear(c.body, out); break;
-      case "BlockStmt": out = collectLinear(s.body, out); break;
+      case "VarDecl": for (const d of s.decls) if (isLinearTy(d.ty ?? "number")) acc = acc.add(d.name); break;
+      case "IfStmt": acc = collectLinear(s.consequent, acc); if (s.alternate) acc = collectLinear(s.alternate, acc); break;
+      case "WhileStmt": case "DoWhileStmt": acc = collectLinear(s.body, acc); break;
+      case "ForStmt": if (s.init && (s.init as Stmt).kind === "VarDecl") acc = collectLinear([s.init as Stmt], acc); acc = collectLinear(s.body, acc); break;
+      case "ForOfStmt": acc = collectLinear(s.body, acc); break;
+      case "SwitchStmt": for (const c of s.cases) acc = collectLinear(c.body, acc); break;
+      case "BlockStmt": acc = collectLinear(s.body, acc); break;
       // A `try` was MISSING here, and it was a LEAK rather than a refusal: `scoped()` is
       // called on all three lists, so `declaredLinear` did find an array declared inside
       // one — but `scoped` then intersects that with `this.linear`, which is what this
@@ -2119,17 +2172,17 @@ function collectLinear(stmts: Stmt[], out: Set<string>): Set<string> {
         // the `TryStmt` case in `stmt`) and `declaredLinear` cannot see it, so `scoped`
         // is handed it explicitly and needs it to be linear for that to count.
         const bound = s.param;
-        if (s.handler !== null && bound !== null && isLinearTy(s.catchTy ?? "string")) out = out.add(bound);
-        out = collectLinear(s.block, out);
-        if (s.handler) out = collectLinear(s.handler, out);
-        if (s.finalizer) out = collectLinear(s.finalizer, out);
+        if (s.handler !== null && bound !== null && isLinearTy(s.catchTy ?? "string")) acc = acc.add(bound);
+        acc = collectLinear(s.block, acc);
+        if (s.handler) acc = collectLinear(s.handler, acc);
+        if (s.finalizer) acc = collectLinear(s.finalizer, acc);
         break;
       }
-      case "MultiStmt": out = collectLinear(s.stmts, out); break;
+      case "MultiStmt": acc = collectLinear(s.stmts, acc); break;
       default: break;
     }
   }
-  return out;
+  return acc;
 }
 
 export function analyzeOwnership(checked: CheckedProgram): OwnDiag[] {
@@ -2254,16 +2307,16 @@ export function analyzeOwnership(checked: CheckedProgram): OwnDiag[] {
   collectMutableArgs(checked.program.body);
 
   const runScope = (body: Stmt[], params: { name: string; ty: Ty }[], untrack: Set<string> = new Set(), mutableNames: Set<string> = new Set(), borrowThis: boolean = false, globals: Set<string> = new Set()): string[] => {
-    const aliases = new Map<string, string>();
     // Receivers whose FIELDS this scope may only borrow: a linear parameter (the caller
     // owns and drops it) and a method's `this`. `this` is unconditional — it names no
     // binding in `params`, and it is a borrow in every member body.
     const borrowRoots = new Set<string>(["this", ...params.filter((p) => isLinearTy(p.ty)).map((p) => p.name)]);
-    collectAliases(body, isMutableTy, aliases, borrowRoots); // ALWAYS: the retains-receiver rule is not `@@mutable`-specific
+    // ALWAYS: the retains-receiver rule is not `@@mutable`-specific.
+    const aliases = collectAliases(body, isMutableTy, new Map<string, string>(), borrowRoots);
     let varTy = new Map<string, Ty>();
     if (mutable.classes.size) {
       for (const p of params) varTy = varTy.set(p.name, p.ty);
-      collectVarTys(body, varTy);
+      varTy = collectVarTys(body, varTy);
     }
     let linear = new Set<string>();
     for (const p of params) if (isLinearTy(p.ty)) linear = linear.add(p.name);
