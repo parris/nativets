@@ -11274,6 +11274,7 @@ L0:
   %t83 = ptrtoint ptr @.str.78 to i64
   call double @nt_arr_push(ptr %t81, i64 %t83)
   %t84 = call i1 @irCallsAny(ptr @.str.77, ptr %t81)
+  call void @nt_arr_free(ptr %t81)
   %t85 = zext i1 %t84 to i32
   call void @js_print_bool(i32 %t85)
   call void @js_print_newline()
@@ -11282,6 +11283,7 @@ L0:
   %t88 = ptrtoint ptr @.str.78 to i64
   call double @nt_arr_push(ptr %t86, i64 %t88)
   %t89 = call i1 @irCallsAny(ptr @.str.79, ptr %t86)
+  call void @nt_arr_free(ptr %t86)
   %t90 = zext i1 %t89 to i32
   call void @js_print_bool(i32 %t90)
   call void @js_print_newline()
@@ -11290,6 +11292,7 @@ L0:
   %t93 = ptrtoint ptr @.str.78 to i64
   call double @nt_arr_push(ptr %t91, i64 %t93)
   %t94 = call i1 @irCallsAny(ptr @.str.80, ptr %t91)
+  call void @nt_arr_free(ptr %t91)
   %t95 = zext i1 %t94 to i32
   call void @js_print_bool(i32 %t95)
   call void @js_print_newline()
@@ -11304,6 +11307,7 @@ L0:
   %t102 = ptrtoint ptr @.str.84 to i64
   call double @nt_arr_push(ptr %t96, i64 %t102)
   %t103 = call i1 @irCallsAny(ptr @.str.81, ptr %t96)
+  call void @nt_arr_free(ptr %t96)
   %t104 = zext i1 %t103 to i32
   call void @js_print_bool(i32 %t104)
   call void @js_print_newline()
@@ -16035,8 +16039,10 @@ L0:
   %t52 = bitcast double 0x4008000000000000 to i64
   call double @nt_arr_push(ptr %t49, i64 %t52)
   %t53 = call double @sum(ptr %t49)
+  call void @nt_arr_free(ptr %t49)
   %t54 = call ptr @nt_arr_new(double 0x3FF0000000000000)
   %t55 = call double @sum(ptr %t54)
+  call void @nt_arr_free(ptr %t54)
   %t56 = call ptr @nt_arr_new(double 0x4010000000000000)
   %t57 = bitcast double 0x4024000000000000 to i64
   call double @nt_arr_push(ptr %t56, i64 %t57)
@@ -16047,6 +16053,7 @@ L0:
   %t60 = bitcast double 0x4044000000000000 to i64
   call double @nt_arr_push(ptr %t56, i64 %t60)
   %t61 = call double @sum(ptr %t56)
+  call void @nt_arr_free(ptr %t56)
   call void @js_print_num(double %t53)
   call void @js_print_sep()
   call void @js_print_num(double %t55)
