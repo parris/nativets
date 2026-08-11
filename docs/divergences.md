@@ -4260,6 +4260,32 @@ is node's own rule.
 
 | NT1028 | a `node:` builtin module, or a member of one, outside the implemented host FFI surface — and the ambient `process.stdout` members outside `.write(s)` | later | the surface is what a self-hosted compiler needs: `node:fs` (`readFileSync`/`writeFileSync`/`existsSync`), `node:child_process` (`spawnSync`), `process.stdout.write` |
 
+### `process.platform` — the TARGET's platform, and the one value node has no word for
+
+`process.platform` is a host builtin returning node's spelling for the platform the program
+is running on: `darwin`, `linux`, `win32`, `android`. On every platform node itself runs on
+this is **not** a divergence — `node file.ts` and our compiled binary print the same string,
+which is what `test/hostio/platform.ts` asserts differentially on whatever box runs it (so a
+Linux runner checks the branch a macOS laptop cannot).
+
+The interesting part is *when* it is resolved. For an AOT binary "the platform I am running
+on" **is** the platform I was built for, so the answer has to follow `--target`. It is
+therefore computed by the **C preprocessor** in `runtime/runtime.c` (`nt_platform`), not
+folded to a constant by codegen. That is forced by a rule this project keeps elsewhere: the
+emitted `.ll` deliberately carries **no target triple** so clang can retarget it, and
+`linkArgv` puts `-target` on the one clang command that compiles both the `.ll` and the
+runtime `.c`. Codegen runs once and cannot know the target; the preprocessor is told. Had we
+folded a constant, `nativets build --target linux` on a Mac would have produced a Linux ELF
+that reported `darwin` — a silent wrong answer, the worst outcome available.
+
+`__ANDROID__` is tested **before** `__linux__`, because Android defines both and node reports
+`android` there.
+
+**The actual divergence is `wasm` only.** No node build targets wasi, so there is no oracle to
+match, and a wasi binary reports **`wasi`** — a value node never produces. That is deliberate:
+guessing one of node's spellings (`linux`, say) would make a wrong answer *look* right. An
+unrecognized platform reports `unknown` for the same reason.
+
 ### Type declarations HOIST; recursive types are still not representable (NT1030)
 
 TypeScript hoists every type declaration in a scope — a type may be used above the line

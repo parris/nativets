@@ -2159,6 +2159,51 @@ const char *nt_getenv(const char *name) {
   return v ? v : "";
 }
 
+/* process.platform -> node's spelling for the platform this binary RUNS on.
+ *
+ * RESOLVED HERE, BY THE C PREPROCESSOR, AND THAT IS THE WHOLE POINT. For an AOT
+ * binary "the platform I am running on" IS the platform I was built for, and the
+ * emitted .ll deliberately carries no target triple so clang can retarget it
+ * (see the driver's `targetFlags`, which puts `-target` on the ONE clang command
+ * that compiles both the .ll and this file). Folding a constant in at codegen
+ * time would therefore bake the COMPILING host's platform into a
+ * cross-compiled binary — `nativets build --target linux` on a Mac would emit a
+ * Linux ELF that reports "darwin". Asking the preprocessor makes the answer
+ * follow `-target` for free, and keeps the IR triple-free.
+ *
+ * Returned as an untracked literal (never freed), like nt_getenv's result.
+ *
+ * ORDER MATTERS: Android defines __linux__ too, so it must be tested first, and
+ * node does report "android" there rather than "linux". */
+const char *nt_platform(void) {
+#if defined(__ANDROID__)
+  return "android";
+#elif defined(__APPLE__)
+  return "darwin";        /* macOS and iOS alike — node's spelling for both */
+#elif defined(_WIN32)
+  return "win32";         /* node says win32 on 64-bit Windows too */
+#elif defined(__linux__)
+  return "linux";
+#elif defined(__wasi__) || defined(__wasm__)
+  /* No node build targets wasi, so there is no oracle to match here. "wasi" is
+   * a deliberate divergence rather than a guess at one of node's spellings —
+   * see docs/divergences.md. */
+  return "wasi";
+#elif defined(__FreeBSD__)
+  return "freebsd";
+#elif defined(__OpenBSD__)
+  return "openbsd";
+#elif defined(_AIX)
+  return "aix";
+#elif defined(__sun)
+  return "sunos";
+#else
+  /* Deliberately not "unknown"-with-a-guess: an unrecognized platform is a
+   * porting task, and a wrong string here is a silent wrong answer. */
+  return "unknown";
+#endif
+}
+
 /* process.exit(code) — flushes stdio and exits (never returns). */
 void nt_exit(double code) { exit((int)code); }
 
