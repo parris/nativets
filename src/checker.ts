@@ -5541,14 +5541,21 @@ class Checker {
    * ============================================================ */
 
   /** Date component getters. All take no arguments and return a `number`, except
-   * `toISOString()` (a `string`). A Date is an immutable time value here, so the
-   * `setX` MUTATORS are refused (NT1023) pointing at reconstruction. */
+   * `toISOString()` (a `string`) and `toJSON()` (`string | null`). A Date is an immutable
+   * time value here, so the `setX` MUTATORS are refused (NT1023) pointing at
+   * reconstruction. */
   private inferDateMethod(method: string, args: Expr[], scope: Scope): Ty {
     void scope;
     if (DATE_GETTERS.has(method) || method === "getTime" || method === "valueOf" || method === "toISOString"
         || method === "toJSON") {
       if (args.length !== 0) throw typeError(`Date.${method}() takes no arguments`);
-      return method === "toISOString" || method === "toJSON" ? "string" : "number";
+      // `toJSON` is NOT `toISOString` under another name: 21.4.4.37 takes the primitive
+      // first and RETURNS null for a non-finite time value (step 3), never reaching the
+      // `toISOString` invocation in step 4. So an Invalid Date's `toJSON()` is `null` and
+      // the method cannot throw — which makes its type `string | null`, node-exactly, so
+      // `?? "…"` and `=== null` compose the way they do in node.
+      if (method === "toJSON") return makeNullable("null", "string");
+      return method === "toISOString" ? "string" : "number";
     }
     if (method.startsWith("set"))
       throw nyi(NYI.WEBAPI, `Date method '.${method}' (a Date is an immutable time value — build a new one, e.g. \`new Date(d.getTime() + ms)\`)`);

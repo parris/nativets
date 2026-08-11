@@ -3677,11 +3677,41 @@ class FnGen {
       if (isDateTy(recv.ty)) {
         const p = e.callee.property;
         if (p === "getTime" || p === "valueOf") return { v: recv.v, ty: "number" };
-        if (p === "toISOString" || p === "toJSON") {
+        if (p === "toISOString") {
           const t = this.fresh();
           this.emit(`${t} = call ptr @nt_date_to_iso(double ${recv.v})`);
           this.emitExcCheck();
           return { v: t, ty: "string" };
+        }
+        // `toJSON` used to share the line above, which is what made an Invalid Date's
+        // `.toJSON()` THROW. 21.4.4.37 tests the time value at step 3 and returns `null`
+        // for a non-finite one, so step 4's `toISOString` invocation is never reached and
+        // the method cannot throw — hence `string | null`, and hence the BRANCH: the ISO
+        // call is fallible, so it may only be evaluated on the finite side.
+        if (p === "toJSON") {
+          const slot = this.slot("string");
+          const nan = this.fresh();
+          this.emit(`${nan} = fcmp uno double ${recv.v}, ${recv.v}`);
+          const nLbl = this.label("tjn"), vLbl = this.label("tjv"), end = this.label("tje");
+          this.terminate(`br i1 ${nan}, label %${nLbl}, label %${vLbl}`);
+          this.to(this.block(vLbl));
+          const iso = this.fresh();
+          this.emit(`${iso} = call ptr @nt_date_to_iso(double ${recv.v})`);
+          this.emit(`store ptr ${iso}, ptr ${slot}`);
+          this.terminate(`br label %${end}`);
+          this.to(this.block(nLbl));
+          this.emit(`store ptr null, ptr ${slot}`);
+          this.terminate(`br label %${end}`);
+          this.to(this.block(end));
+          const got = this.fresh();
+          this.emit(`${got} = load ptr, ptr ${slot}`);
+          const isNull = this.fresh();
+          this.emit(`${isNull} = icmp eq ptr ${got}, null`);
+          const tag = this.fresh();
+          this.emit(`${tag} = select i1 ${isNull}, i64 1, i64 2`); // 1 = null, 2 = present
+          const val = this.fresh();
+          this.emit(`${val} = ptrtoint ptr ${got} to i64`);
+          return { v: this.nullBox(tag, val), ty: makeNullable("null", "string") };
         }
         const g = DATE_GETTERS.get(p)!;
         const t = this.fresh();

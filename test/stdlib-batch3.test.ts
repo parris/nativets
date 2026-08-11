@@ -211,6 +211,29 @@ try {
 console.log("after");
 `,
   },
+  /*
+   * `Date.prototype.toJSON` is NOT `toISOString` by another name. 21.4.4.37 takes the
+   * primitive FIRST and returns `null` when it is a non-finite Number — step 3, before
+   * step 4 ever invokes `toISOString` — so an Invalid Date serialises as `null` and the
+   * method never throws. Its result type is therefore `string | null`, which is why the
+   * `?? "-"` row below is part of the case rather than a separate one.
+   *
+   * `JSON.stringify(invalidDate)` was already correct (`nt_date_to_json` checks for NaN),
+   * which is exactly what hid this: only the DIRECT `.toJSON()` call routed through
+   * `toISOString` and exited 1 with empty stdout where node prints `null` and carries on.
+   */
+  {
+    name: "toJSON() of an Invalid Date is null, not a throw (21.4.4.37 step 3)",
+    code: `
+console.log(new Date(NaN).toJSON());
+console.log(new Date(8640000000000001).toJSON());
+console.log(new Date(0).toJSON());
+console.log(new Date(NaN).toJSON() ?? "-");
+console.log(new Date(0).toJSON() ?? "-");
+console.log(new Date(NaN).toJSON() === null);
+console.log("still here");
+`,
+  },
 ]);
 
 differential("stdlib batch 3: new Date(isoString) matches node", [
