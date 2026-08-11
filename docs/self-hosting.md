@@ -5360,18 +5360,32 @@ silent-wrong-answer class. A lane already proved the related version of this: de
 codegen's walks to `ast.ts`'s walkers re-introduced the `name2` bug plus nine siblings,
 because those walkers have no hook for binding-name strings.
 
-### 2. In-place element store — the "arrays are immutable" bucket
+### 2. ~~In-place element store~~ — **DONE (`7fedd14`)**
 
-`checker.ts`'s `IndexAssign` arm throws unconditionally for arrays and **never consults the
-`@@mutable` opt-in** that `.push` honours through `accumulatorName`. That looks like a
-two-line oversight and is not: **there is no in-place element store in the runtime at
-all.** `nt_arr_with` is the only writer and it is persistent; `nt_pvec.c:185` marks the
-in-place path *"unreachable: nt_arr_with panics first"*. Arrays become persistent tries
-past 32 elements, so a real `nt_arr_set` needs refcount-aware mutation (safe only at
-refcount 1) or it silently rewrites storage another holder can see.
+The analysis this section carried was right about the API and wrong about the conclusion,
+and the correction is the useful part.
 
-Wiring the checker without that is precisely the widen-the-predicate-not-the-layout
-miscompile recorded in [[nativets-testing-lessons]].
+Right: `nt_arr_with` is the only *exported* writer and it is persistent; `nt_pvec.c:185`
+marks its in-place path *"unreachable"*; arrays become persistent tries past 32 elements,
+so a naive `nt_arr_set` would silently rewrite storage another holder can see.
+
+Wrong: that a safe path had to be BUILT. **`arr_thaw` already existed**, one screen above
+`nt_arr_with` in the same file, and its comment names the precedent verbatim — `.reverse`
+is an in-place mutator kept for node compatibility, and it thaws a shared trie into a
+PRIVATE flat block first, *"so it must never be written through"*. `nt_arr_set_inplace` is
+that pattern plus `nt_arr_with`'s bounds check. Three lines; no refcount analysis invented.
+
+`test/runtime/arrset_test.c` (16 checks) pins the property at BOTH sides of the trie
+threshold, because they are different code paths: after `big[50] = 555` on a 100-element
+array, the version `.with` handed out earlier still reads `777`. End to end, `//@@mutable`
++ `xs[i] = v` matches node byte for byte, an unmarked binding is still `NT1606`, and an
+out-of-range write still PANICS per Stage 41 rather than growing the array as node does.
+
+**THE MISTAKE THIS SECTION AND §1 BOTH MADE, twice in one session:** both were written from
+the **exported API surface** rather than from the implementation, and both concluded a
+capability was absent while its safety mechanism sat in a `static` helper a few lines away
+(`NtColl` was already a cell; `arr_thaw` was already the sharing fix). Before pricing a
+runtime feature as missing, read the file, not the header.
 
 ### 3. `@@mutable` on fields — the 20x "objects are immutable" bucket
 
