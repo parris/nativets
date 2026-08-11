@@ -5546,6 +5546,17 @@ class FnGen {
         case "SwitchStmt": for (const c of s.cases) acc = this.collectBoundNames(c.body, acc); break;
         case "BlockStmt": acc = this.collectBoundNames(s.body, acc); break;
         case "MultiStmt": acc = this.collectBoundNames(s.stmts, acc); break;
+        // A nested `function f()` binds `f` in the arrow's scope exactly as a `let` does.
+        // Unreachable as a miscompile today only because any REFERENCE to a nested function
+        // is NT1003 ("function values / unknown callee") — the declaration itself compiles
+        // fine, so the binding is already in the tree. Missing it here is the same shape as
+        // the `name2` bug: two inlined callbacks in one frame would both keep the source
+        // name `f`. It also feeds `childRenameMap`, where the omission is a SHADOWING miss —
+        // an inner `function f` would not mask an outer `f`, so the inner body's references
+        // would be rewritten to the outer's fresh name. Collected here for the same reason
+        // `BlockDrops` is renamed in `subStmt`: it costs nothing and stops this being a live
+        // miscompile the day nested functions become callable.
+        case "FuncDecl": acc = acc.add(s.name); break;
         case "TryStmt":
           if (s.param) acc = acc.add(s.param);
           acc = this.collectBoundNames(s.block, acc);
