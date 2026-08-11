@@ -351,13 +351,25 @@ export function isArrayIndexKey(k: string): boolean {
  * spelling: with no leading zeros, a shorter digit string is the smaller number, and equal
  * lengths order lexicographically. The non-index partition is built by a straight filter,
  * so it is stable by construction and does not lean on `Array#sort` being stable.
+ *
+ * `.sort` is chained DIRECTLY onto `.filter` rather than applied to a bound local, and that
+ * is a subset requirement, not a style choice: arrays are immutable here, so `.sort` is only
+ * accepted on a FRESH receiver — storage with no other owner, where sorting in place is
+ * unobservable. Binding the filter result first (`const idx = …; idx.sort(…)`) makes it an
+ * ordinary array and `NT1606` refuses it, which reintroduces a blocker in ast.ts — a module
+ * that already self-compiles. The self-host ratchet catches exactly that.
  */
 export function canonicalKeyOrder<T extends { key: string }>(fields: T[]): T[] {
-  const idx = fields.filter((f) => isArrayIndexKey(f.key));
-  if (idx.length === 0) return fields;                     // the common case: nothing moves
-  const rest = fields.filter((f) => !isArrayIndexKey(f.key));
-  idx.sort((a, b) => (a.key.length !== b.key.length ? a.key.length - b.key.length : a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
-  return idx.concat(rest);
+  // The common case is that no key is an index and nothing moves. It still returns a fresh
+  // array rather than `fields` itself: `fields` is BORROWED from the caller, so handing it
+  // back is a move-out of a borrow (`NT1604`) — the same subset rule that shapes the `.sort`
+  // above. `.map` in `objectType` already allocates, so the copy costs no extra allocation.
+  if (!fields.some((f) => isArrayIndexKey(f.key))) return [...fields];
+  return [
+    ...fields.filter((f) => isArrayIndexKey(f.key))
+      .sort((a, b) => (a.key.length !== b.key.length ? a.key.length - b.key.length : a.key < b.key ? -1 : a.key > b.key ? 1 : 0)),
+    ...fields.filter((f) => !isArrayIndexKey(f.key)),
+  ];
 }
 
 export function objectType(fields: { key: string; ty: Ty }[]): Ty {
