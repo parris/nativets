@@ -2759,7 +2759,57 @@ class Checker {
     // Sound for the same reason the object arm is: acceptance is gated by `reshapable`,
     // so only a literal whose elements can be rebuilt in the target layout gets through.
     if (isArrayTy(target) && isArrayTy(source)) return this.assignable(elemTy(target), elemTy(source), assumed);
+    // A `Map`/`Set` is compatible when its TYPE ARGUMENTS are, for exactly the reason the
+    // array arm above exists — and its absence was a real refusal, not a theoretical gap.
+    // A class field `by: Map<string, N>` inside `class N` holds the FOLDED `Map<string,@N>`
+    // (the field substitution mints the back-edge), while `new Map<string, N>()` in the
+    // constructor body produces the UNFOLDED `Map<string,N{…}>` (`unself` substitutes the
+    // self marker for the instance shape). Same type, two spellings, and with no arm here
+    // the comparison fell through to `return false`:
+    //
+    //   cannot assign Map<string,N{v:number,by:Map<string,@N>}> to field 'by' of type Map<string,@N>
+    //
+    // The equirecursive unfold at the top of this function only fires when a whole side IS
+    // a reference; nested inside a type argument it never got the chance. `Map<string, M>`
+    // for an unrelated class always worked, which is what makes this a back-edge bug rather
+    // than a Map one. `assumed` is threaded through so the coinductive rule still
+    // terminates when the argument is what closes the cycle.
+    if (isMapTy(target) && isMapTy(source)) {
+      return this.sameModuloFold(mapKeyTy(target), mapKeyTy(source))
+        && this.sameModuloFold(mapValTy(target), mapValTy(source));
+    }
+    if (isSetTy(target) && isSetTy(source)) return this.sameModuloFold(setElemTy(target), setElemTy(source));
     return false;
+  }
+
+  /**
+   * Are these the SAME type, differing at most in whether a recursive back-edge is FOLDED?
+   *
+   * Deliberately NOT `assignable` — that is the whole point of this helper existing. The
+   * array arm above compares elements structurally and gets away with it because the
+   * declaration path gates acceptance on `reshapable`, which rebuilds a LITERAL in the
+   * target's slot layout. A `Map`/`Set` has no literal to rebuild: its contents are built
+   * at runtime, so structural compatibility would be accepted and never reshaped.
+   *
+   * Measured, with the structural version in the tree:
+   *
+   *     const m = new Map<string, { a: number }>();
+   *     const n: Map<string, { a: number; b?: number }> = m.set("x", { a: 1 });
+   *
+   * was ACCEPTED, where it is correctly refused without it — and `n.get("x").b` then reads
+   * a slot the value does not have. Turning a safe refusal into a silent wrong answer is
+   * the one trade this compiler never makes, so only the fold/unfold difference is allowed
+   * through: `Map<string,@N>` and `Map<string,N{…}>` are one type written at two depths.
+   */
+  private sameModuloFold(a: Ty, b: Ty, assumed: Set<string> = new Set<string>()): boolean {
+    if (a === b) return true;
+    // Only a back-edge may differ. Two distinct shapes are two distinct types here.
+    if (!isTypeRefTy(a) && !isTypeRefTy(b)) return false;
+    const key = `${a}|${b}`;
+    if (assumed.has(key)) return true; // coinductive, as in `assignable`
+    // `.add` REBINDS: a Set is persistent here, and the new set has exactly one consumer,
+    // the recursive call below that takes it as an argument.
+    return this.sameModuloFold(this.unfold(a), this.unfold(b), assumed.add(key));
   }
 
   /**

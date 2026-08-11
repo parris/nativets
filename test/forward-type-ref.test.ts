@@ -335,19 +335,81 @@ console.log(root.depth);
 console.log(root.parent);`);
   });
 
-  // Every CARRIER of a back-edge declares: a bare field, an array, a Map value, a function
-  // return. The reference is just a field type, so the carrier is the existing machinery.
-  test("a class field carries the back-edge through array/Map/optional/function forms", () => {
-    for (const field of ["kids: N[];", "next?: N;", "by: Map<string, N>;", "self: () => N;"]) {
+  /*
+   * Every CARRIER of a back-edge declares: a bare field, an array, a Map value, a function
+   * return.
+   *
+   * THE ORIGINAL FORM OF THIS TEST MEASURED SOMETHING ELSE ENTIRELY. It declared each
+   * field and never assigned it, so three of the four were refused `NT1015` — "field is
+   * never assigned by its constructor" — which is definite assignment, not the back-edge
+   * machinery. Only `next?: N` passed, and it passed because OPTIONAL fields are exempt
+   * from that rule. So the test was red for a reason it did not name, and green on the one
+   * case that dodged the check it was accidentally exercising. Each field is assigned here.
+   */
+  test("a class field carries the back-edge through array/Map/optional forms", () => {
+    const cases: { field: string; init: string }[] = [
+      { field: "kids: N[];", init: "this.kids = [];" },
+      { field: "next?: N;", init: "" },
+      { field: "by: Map<string, N>;", init: "this.by = new Map<string, N>();" },
+    ];
+    for (const { field, init } of cases) {
       const r = reject(`
 class N {
   v: number;
   ${field}
-  constructor(v: number) { this.v = v; }
+  constructor(v: number) { this.v = v; ${init} }
 }
 console.log(1);`);
       expect({ field, code: r.code }).toEqual({ field, code: "" });
     }
+  });
+
+  /* The Map carrier is the one that was genuinely broken, and it needed the assignment to
+   * show: `Map<string,@N>` (the field, folded) against `Map<string,N{…}>` (the value,
+   * unfolded) are the same type in two spellings, and `assignable` compared type ARGUMENTS
+   * for arrays but not for `Map`/`Set` — so it fell through to `return false`. The
+   * non-recursive `Map<string, M>` was always fine, which is what makes this a back-edge
+   * bug rather than a Map bug. */
+  test("a recursive Map value type round-trips against node", async () => {
+    await matchesNode(`
+class N {
+  v: number;
+  by: Map<string, N>;
+  constructor(v: number) { this.v = v; this.by = new Map<string, N>(); }
+}
+const n = new N(1);
+console.log(n.v, n.by.size);`);
+  });
+
+  /* THE GUARD ON THAT FIX, and the reason it is not simply `assignable` on the type
+   * arguments. The array arm compares elements structurally and is safe only because the
+   * declaration path gates on `reshapable`, which rebuilds a LITERAL into the target's slot
+   * layout. A Map has no literal to rebuild — its contents are built at runtime — so a
+   * structural rule would accept this and never reshape anything, and `n.get("x").b` would
+   * then read a slot the value does not have. Measured: the structural version ACCEPTED it.
+   * Structural compatibility is not layout compatibility. */
+  test("a Map whose value type merely FITS structurally is still refused", () => {
+    const r = reject(`
+const m = new Map<string, { a: number }>();
+const n: Map<string, { a: number; b?: number }> = m.set("x", { a: 1 });
+console.log(n.size);`);
+    expect(r.code).toBe("NT2001");
+  });
+
+  /* `self: () => N` is NOT a back-edge question and is dropped from the list above: a
+   * function-VALUED field cannot be called at all here (`NT2001`, "'self' is a field of N,
+   * not a method"), so the form would be refused with or without recursion. Pinned so the
+   * day that limitation lifts, this reads as a back-edge case again rather than silently
+   * staying uncovered. */
+  test("a function-VALUED field is refused for its own reason, not recursion", () => {
+    const rec = reject(`
+class N {
+  v: number;
+  self: () => number;
+  constructor(v: number) { this.v = v; this.self = () => 7; }
+}
+console.log(new N(1).self());`);
+    expect(rec.code).toBe("NT2001");
   });
 
   // The guard on the guard: a method may still name its own class in a SIGNATURE. That is

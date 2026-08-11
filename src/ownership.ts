@@ -1724,8 +1724,14 @@ class Analyzer {
         // and its body is spliced into the enclosing frame, which runs once — so a value
         // moved there really is moved once, and borrowing it would refuse code that is
         // correct today (`xs.map((x) => x)` and every sibling).
-        const savedCaptureBorrows = this.captureBorrows;
-        const savedBorrowBindings = this.borrowBindings;
+        // COPIES, not aliases. `.add` REBINDS under this compiler's persistent `Set` but
+        // MUTATES IN PLACE under bun, where it returns the receiver — so holding the old
+        // reference and assigning it back restores nothing at all on the runtime that
+        // actually runs this pass. Measured: the borrows leaked out of every arrow and
+        // `return tokens` at the top level of `lex` (src/lexer.ts, no arrow in sight) was
+        // refused NT1604, which took two modules off the self-hosting ladder.
+        const savedCaptureBorrows = new Set<string>(this.captureBorrows);
+        const savedBorrowBindings = new Set<string>(this.borrowBindings);
         if (!inlined) {
           // Only genuine captures: subtract every name the arrow itself binds. An arrow's
           // own parameters and locals keep their source spelling (`alphaRenameShadows`
