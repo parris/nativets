@@ -5408,10 +5408,15 @@ un-narrowed `Expr` — which `unionCommonField` used to answer — stops resolvi
 blockers are therefore NOT closed by marking the interfaces; the tag's nominality is the
 obstacle, exactly as the original note said, just for a different reason than it gave.
 
-**What would close them** is a way to permit an in-place field store WITHOUT making the
-member nominal — the attribute on the BINDING rather than the type, which is how the two
-features above work (`//@@mutable` on the parameter/local). That is `NT1023` today ("not an
-array, Map or Set") and is the remaining, unmeasured piece.
+**DONE — the attribute on the BINDING.** `//@@mutable` on the parameter or local permits
+the store and changes NO type, so every structural read still resolves. That is precisely
+what marking the type broke. The slot is `unionCommonField` for a union receiver and the
+ordinary field index for a record; an unmarked binding is still `objects are immutable`.
+
+Applied to five sites in `src/parser.ts` (`t.value`, `d.mutable`, `p.paramProp`, and two
+more), **depth 85 -> 81**, no regression to the 4-of-12 rung count. The negative
+measurement above is what produced this: without it I would have retried the type-level
+route rather than looking for one that leaves the type alone.
 
 ### What that leaves
 

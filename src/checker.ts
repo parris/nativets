@@ -4656,7 +4656,32 @@ class Checker {
         // The parser cannot decide the last two (it does not know types), so it emits the
         // node and defers here. The ownership pass then decides WHO may mutate (NT1607).
         const ot = this.type(e.object, scope);
-        if (!e.viaThis && !this.isMutableTy(ot)) {
+        // A `@@mutable` BINDING permits the store without making the TYPE nominal, and
+        // that distinction is the whole point. Marking the AST interfaces instead was
+        // measured and REGRESSED the frontier (4 of 12 modules at IR down to 3): a tagged
+        // member stops unifying structurally, so a READ through the un-narrowed union
+        // breaks. The attribute on the binding changes no type, so every read still works.
+        //
+        // The slot still has to be well-defined: for a UNION receiver that is
+        // `unionCommonField` (same index, same widened type in every member), exactly as
+        // the read path resolves it; for a plain object it is the ordinary field index.
+        const bindingMutable = e.object.kind === "Identifier"
+          && (scope.lookup(e.object.name)?.mutable ?? false);
+        if (bindingMutable && isUnionTy(ot)) {
+          const shared = unionCommonField(ot, e.field);
+          if (shared === undefined) {
+            throw mutationError(
+              `\`${exprText(e.object) ?? "e"}.${e.field} = v\` — '${e.field}' is not at one shared slot in every member of ${showUnion(ot)}`,
+              `\`//@@mutable\` permits a store to a field EVERY member has at the same index with the same type (that is what makes the slot known without narrowing). '${e.field}' is absent from a member, or sits at a different index. Narrow on the discriminant first, then assign`,
+              exprLoc(e.object),
+            );
+          }
+          const uvt = this.type(e.value, scope, shared.ty);
+          if (!this.assignable(shared.ty, uvt)) throw typeError(`Cannot assign ${uvt} to ${shared.ty} field '${e.field}'`, exprLoc(e.object));
+          e.ty = shared.ty;
+          return shared.ty;
+        }
+        if (!e.viaThis && !bindingMutable && !this.isMutableTy(ot)) {
           const target = exprText(e.object) === undefined ? "o.f" : `${exprText(e.object)}.${e.field}`;
           // A union of `@@mutable` members is refused for a DIFFERENT reason than the
           // Stage-29 immutability rule, and saying "objects are immutable" there is
@@ -6714,9 +6739,13 @@ class Checker {
    */
   private checkAccumulator(s: { mutable?: boolean; declKind: "let" | "const" }, d: Declarator): void {
     if (!s.mutable) return;
-    if (d.ty === undefined || !(isArrayTy(d.ty) || isMapTy(d.ty) || isSetTy(d.ty))) {
+    // …and a RECORD or a UNION, for the in-place field store. The attribute is on the
+    // BINDING, so no type becomes nominal and every structural read still resolves —
+    // which is what marking the TYPE broke (measured: 4 of 12 modules at IR down to 3).
+    if (d.ty === undefined
+        || !(isArrayTy(d.ty) || isMapTy(d.ty) || isSetTy(d.ty) || isObjectTy(d.ty) || isUnionTy(d.ty))) {
       throw decoratorError(
-        `'@@mutable' on '${d.name}', which is not an array, Map or Set (it is '${d.ty ?? "unknown"}')`,
+        `'@@mutable' on '${d.name}', which is not an array, Map, Set, record or union (it is '${d.ty ?? "unknown"}')`,
         "`@@mutable` on a `let`/`const` marks an ARRAY ACCUMULATOR — a binding `.push` may append to in place. For a record use `@@mutable type`, for a class `@@mutable class`",
       );
     }
@@ -7639,9 +7668,10 @@ class Checker {
       // HAD an in-place path (`nt_arr_push`) and a collection did not, so marking one
       // promised more than was implemented. `nt_map_put_slot_inplace` and its siblings are
       // that implementation (test/runtime/collinplace_test.c).
-      if (p.mutable && !isArrayTy(tys[i]!) && !isMapTy(tys[i]!) && !isSetTy(tys[i]!)) {
+      const pt = tys[i]!;
+      if (p.mutable && !isArrayTy(pt) && !isMapTy(pt) && !isSetTy(pt) && !isObjectTy(pt) && !isUnionTy(pt)) {
         throw decoratorError(
-          `'@@mutable' on parameter '${p.name}', which is not an array, Map or Set (it is '${tys[i]}')`,
+          `'@@mutable' on parameter '${p.name}', which is not an array, Map, Set, record or union (it is '${tys[i]}')`,
           "`@@mutable` on a parameter marks an ARRAY the callee may `.push` to in place. For a record parameter use `@@mutable type`, for a class `@@mutable class`",
         );
       }

@@ -1960,6 +1960,11 @@ class Parser {
    * leave the remainder in place for the enclosing list to close with.
    */
   private eatTypeClose(): void {
+    // `//@@mutable` on the BINDING, not on the `Token` type: the attribute permits the
+    // in-place field store without making the type nominal. Marking the type instead was
+    // measured and regressed the frontier — a nominal member stops unifying structurally,
+    // so reads through the union break (docs/self-hosting.md).
+    //@@mutable
     const t = this.peek();
     if (t.type === "punct" && (t.value === ">>" || t.value === ">>>")) {
       t.value = t.value.slice(1); // leaves `>` (or `>>`) for the outer level
@@ -2592,7 +2597,13 @@ class Parser {
    * means, and a destructuring pattern lowers to several declarators none of which the
    * user wrote.
    */
-  private applyVarAttrs(dec: { attrs: string[]; wrappers: string[] } | null, d: VarDecl): VarDecl {
+  private applyVarAttrs(
+    dec: { attrs: string[]; wrappers: string[] } | null,
+    // `//@@mutable` on the PARAMETER — the binding-level opt-in, so `VarDecl` stays
+    // structural. See `eatTypeClose` for why the type-level attribute is not the answer.
+    //@@mutable
+    d: VarDecl,
+  ): VarDecl {
     if (!dec || (!dec.attrs.length && !dec.wrappers.length)) return d;
     if (dec.wrappers.length) {
       throw decoratorError(
@@ -2687,7 +2698,11 @@ class Parser {
     // `const run = (f: () => Promise<T>) => …` — bind the arrow's promise-typed parameters
     // to the name calls will actually use, so `run(one)` is a legal escape.
     if (init !== undefined && init.kind === "ArrowFunction" && init.promiseParams !== undefined) {
-      this.promiseParamsByFn = this.promiseParamsByFn.set(name, init.promiseParams);
+      // Bound to a LOCAL first: `init.promiseParams` is `?Unumber[]` and the guard above
+      // proves it present, but narrowing needs a stable access path and a FIELD of another
+      // object is not one — the same shape as `sub.blockedOn` and `this.collectTypes`.
+      const pp = init.promiseParams;
+      if (pp !== undefined) this.promiseParamsByFn = this.promiseParamsByFn.set(name, pp);
     }
     return { name, annot, annotHead, init };
   }
@@ -2898,6 +2913,9 @@ class Parser {
         let def: Expr | undefined;
         if (this.at("=")) { this.eat("="); def = this.parseAssign(); }
         if (paramProp && rest) throw nyi(NYI.CLASS_FEATURE, "a rest parameter cannot be a parameter property");
+        // `//@@mutable` on the BINDING — two field stamps follow. Not on `Param`'s type:
+        // a nominal member breaks the structural reads (docs/self-hosting.md).
+        //@@mutable
         const p = this.mkParam(pname, annot, def, rest, optional);
         if (paramProp) p.paramProp = true;
         if (pmutable) p.mutable = true;
