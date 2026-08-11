@@ -665,7 +665,13 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // (no in-place primitive; the spread is the answer) and a field write through a
     // `for-of` ELEMENT, which is a BORROW and the one receiver the `@@mutable` opt-in
     // deliberately does not reach, so the list is rebuilt instead.
-    ["NT1002", "NT2001"],
+    // ...and NT2001 leaves again after eight more src/parser.ts shapes: three `as
+    // FuncDecl` literals that wanted ANNOTATIONS (an assertion demands the layout, an
+    // annotation reshapes into it), a conditional spread, an optional chain that tested
+    // without narrowing, a `FuncDecl[]` that is not a `Stmt[]` (the member's `kind` is a
+    // literal, the array's widens), a variadic spread, and a field stamp taking the
+    // BINDING-level opt-in. The group lands on NT1001.
+    ["NT1001", "NT1002"],
     );
     // RE-MEASURED AT THE MERGE, and NEITHER SIDE WAS RIGHT — which is the whole argument
     // for re-measuring instead of picking one. This lane's list still carried NT1009
@@ -778,9 +784,7 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // ...and NT2001 holds the parser group again, one code further along after four
     // more src/parser.ts shapes came off (an annotated empty literal, `unshift`, a
     // `for-of` element write rebuilt as a list, and a nullable field read).
-    expect(byCode["NT2001"]?.slice().sort() ?? []).toEqual(
-      ["cli.ts", "coverage.ts", "driver.ts", "modules.ts", "parser.ts"],
-    );
+    expect(byCode["NT2001"]?.slice().sort() ?? []).toEqual([]);
     // The five modules moved TOGETHER onto ast.ts's next one — `HOST_MODULES`, a `Record`
     // initialized with an object literal. Same set, one code further along; asserted here
     // so the group staying a group is visible rather than inferred.
@@ -939,9 +943,7 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // arrived after six blockers came off parser.ts in one sitting (Set<string>[] ->
     // deferred.push -> a nullable Map value -> a stale `as` assertion), and what holds
     // them now is `cannot infer type of arrow parameter`.
-    expect((byCode["NT2001"] ?? []).slice().sort()).toEqual(
-      ["cli.ts", "coverage.ts", "driver.ts", "modules.ts", "parser.ts"],
-    );
+    expect((byCode["NT2001"] ?? []).slice().sort()).toEqual([]);
     expect((byCode["NT1002"] ?? []).slice().sort()).toEqual(
       ["checker.ts", "codegen.ts", "ownership.ts"],
     );
@@ -975,7 +977,9 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // reached after five blockers came off src/parser.ts in one sitting (the
     // BINDING-level `@@mutable` store, six push accumulators, and three narrowing
     // gaps where a value had to be resolved into a definite local).
-    expect((byCode["NT1001"] ?? []).slice().sort()).toEqual([]);
+    expect((byCode["NT1001"] ?? []).slice().sort()).toEqual(
+      ["cli.ts", "coverage.ts", "driver.ts", "modules.ts", "parser.ts"],
+    );
     // NT1606 — `o.f = v` on an AST node, held by the same nine modules through the link.
     // This is the DECISION the entry above named, arrived at: the typed walkers in
     // src/ast.ts write `e.ty = f(e.ty)` exactly where the reflective ones wrote
@@ -1409,9 +1413,7 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // does not narrow) and four more blockers came off behind it in the same sitting.
     // ...and NT2001 refills with parser.ts and the four modules that link it — a
     // different five from the ones that emptied it (see the note above).
-    expect((byCode["NT2001"] ?? []).slice().sort()).toEqual(
-      ["cli.ts", "coverage.ts", "driver.ts", "modules.ts", "parser.ts"],
-    );
+    expect((byCode["NT2001"] ?? []).slice().sort()).toEqual([]);
     expect(byCode["NT1003"] ?? []).toEqual([]);
     // NEW BUCKET, and it is one module deep: the captured-binding write behind the arrow.
     // ...and empty again: the cursor is one `//@@mutable` record now, so nothing writes a

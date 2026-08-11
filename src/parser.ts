@@ -3374,7 +3374,12 @@ class Parser {
     this.typeAliases = this.typeAliases.set(name, objTy); // uses of `name` as a type resolve to the instance shape
     const thisParam: Param = { name: "this", annot: objTy };
     //@@mutable
-    let emitted: FuncDecl[] = [];
+    // `Stmt[]`, matching `hoistedFns` (which these are pushed into) and `mapTypesDeep`'s
+    // parameter. A `FuncDecl[]` is NOT a `Stmt[]` here: the union's member carries
+    // `kind:"FuncDecl"` — a string LITERAL — while a `FuncDecl[]` element widens to
+    // `kind:string`, so the element types genuinely differ and the call was NT2001. Every
+    // value pushed is a `FuncDecl`, which IS a member, so nothing else changes.
+    let emitted: Stmt[] = [];
     /** `const __dec_C_m = w(…)` statements — the ONE-TIME decorator applications. */
     let decorators: Stmt[] = [];
     // Constructor → `C.constructor(this, …ctorParams): void` (caller allocates `this`).
@@ -3440,9 +3445,12 @@ class Parser {
     }
     // Substitute the self MARKER for the real instance type, everywhere it reached.
     const unself = (t: Ty): Ty => (t.includes(selfMarker) ? (t.split(selfMarker).join(objTy) as Ty) : t);
-    emitted = mapTypesDeep(emitted, unself) as FuncDecl[];
+    emitted = mapTypesDeep(emitted, unself);
     decorators = mapTypesDeep(decorators, unself);
-    this.hoistedFns.push(...emitted);
+    // A LOOP, not `push(...emitted)`: a spread into a variadic call is NT1006, and the
+    // loop is what the spread means. `hoistedFns` is an accumulator field, so the push is
+    // the in-place one the array opt-in legalizes.
+    for (const f of emitted) this.hoistedFns.push(f);
     // The decorator applications run WHERE THE CLASS WAS DECLARED (a module-level
     // `const`), so each wrapper is applied exactly ONCE — Python's `m = w(m)`, not a
     // per-call wrap. Function declarations hoist, so a decorator defined further down
@@ -3468,7 +3476,7 @@ class Parser {
     fn: FuncDecl,
     wrappers: string[],
     //@@mutable
-    emitted: FuncDecl[],
+    emitted: Stmt[],
     //@@mutable
     decorators: Stmt[],
   ): void {
@@ -3525,7 +3533,15 @@ class Parser {
    * Decision 2 — a setter that does not return gets an IMPLICIT `return this`: the new
    * instance for an ordinary class, the mutated receiver for an `@@mutable` one.
    */
-  private lowerSetter(fn: FuncDecl, cls: string, isMutable: boolean, selfTy: Ty): void {
+  private lowerSetter(
+    // `//@@mutable` on the PARAMETER — this function stamps `copyThis`/`returnAnnot` onto
+    // the FuncDecl its caller owns, which is the whole point of taking it by reference.
+    //@@mutable
+    fn: FuncDecl,
+    cls: string,
+    isMutable: boolean,
+    selfTy: Ty,
+  ): void {
     const returns = valueReturns(fn.body);
     if (!isMutable) {
       fn.copyThis = true;
