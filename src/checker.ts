@@ -4663,6 +4663,25 @@ class Checker {
           // simply untrue — see `allUnionMembersMutable` for the three-step loop the
           // generic message used to send people round. The refusal is unchanged.
           if (this.allUnionMembersMutable(ot)) {
+            // A SHARED FIELD IS STORABLE — the refusal below said so itself: "the READ is:
+            // `unionCommonField` proves a shared field sits at one constant slot in every
+            // member". A store to that same slot is well-defined for exactly the same
+            // reason, and `unionCommonField` is the test: it answers `undefined` unless the
+            // field is at the SAME index with the SAME widened type in every member, so a
+            // field that moves between members (or changes type) is still refused.
+            //
+            // Every member is `@@mutable` here, so in-place is what the attribute promises
+            // and no copy-on-write reader can be surprised. This is the AST-stamp shape —
+            // `e.ty = v`, `arrow.isAsync = v` — that holds 23 blockers.
+            const shared = unionCommonField(ot, e.field);
+            if (shared !== undefined) {
+              const vt = this.type(e.value, scope, shared.ty);
+              if (!this.assignable(shared.ty, vt)) {
+                throw typeError(`Cannot assign ${vt} to ${shared.ty} field '${e.field}'`, exprLoc(e.object));
+              }
+              e.ty = shared.ty;
+              return shared.ty;
+            }
             const d = unionDiscriminant(ot);
             const key = d === undefined ? "kind" : d.key;
             throw mutationError(

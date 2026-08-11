@@ -4181,10 +4181,29 @@ class FnGen {
       case "FieldAssign": {
         // `this.field = value` — store one instance slot (constructor initialization).
         const obj = this.genExpr(e.object);
+        // A UNION receiver resolves through `unionCommonField`, exactly as the READ does.
+        // `fieldIndex` answers -1 for a union (its `objectFields` is empty), which is the
+        // trap that produced a `getelementptr … i64 -1` on the read path — floored in
+        // `genFieldRead`, and the same floor is why this arm must come first. The checker
+        // only reaches here when every member is `@@mutable` AND the field sits at one
+        // shared slot with one type in all of them.
+        if (isUnionTy(obj.ty)) {
+          const shared = unionCommonField(obj.ty, e.field);
+          if (shared === undefined)
+            throw internalError(`field store '.${e.field}' on the union ${obj.ty}: not a field every member shares at one slot — the checker should have refused it`);
+          const uslot = this.toSlot(this.coerce(this.genExpr(e.value), shared.ty));
+          const ug = this.fresh();
+          this.emit(`${ug} = getelementptr i64, ptr ${obj.v}, i64 ${shared.index}`);
+          this.emit(`store i64 ${uslot}, ptr ${ug}`);
+          return { v: this.fromSlot(uslot, shared.ty), ty: shared.ty };
+        }
         const ft = fieldType(obj.ty, e.field)!;
         const slot = this.toSlot(this.coerce(this.genExpr(e.value), ft));
         const g = this.fresh();
-        this.emit(`${g} = getelementptr i64, ptr ${obj.v}, i64 ${fieldIndex(obj.ty, e.field)}`);
+        const fi = fieldIndex(obj.ty, e.field);
+        if (fi < 0)
+          throw internalError(`field store '.${e.field}' on ${obj.ty}: no such field (fieldIndex answered ${fi}), which would emit a getelementptr BEFORE the object`);
+        this.emit(`${g} = getelementptr i64, ptr ${obj.v}, i64 ${fi}`);
         this.emit(`store i64 ${slot}, ptr ${g}`);
         return { v: this.fromSlot(slot, ft), ty: ft };
       }

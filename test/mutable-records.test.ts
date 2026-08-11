@@ -1026,7 +1026,7 @@ console.log(k);
  * layout, so there is no store to emit until the member is known. Only the hint moves.
  * Every case below was run through nativets AND node before being written down.
  */
-describe("NT1606 on a union receiver: the hint must name the fix that compiles", () => {
+describe("a SHARED field of a `@@mutable` union stores in place", () => {
   const UNION = `
 //@@mutable
 interface NumLit { kind: "Num"; ty?: string }
@@ -1035,145 +1035,84 @@ interface StrLit { kind: "Str"; ty?: string }
 type E = NumLit | StrLit;
 `;
 
-  test("the refusal stands — a union receiver has no single slot to store into", () => {
-    const r = rejectionOf(`${UNION}
+  /*
+   * THE REFUSAL THIS BLOCK USED TO PIN IS GONE, and its own premise is what gave it away:
+   * "a union-typed receiver has no single slot layout, so there is no store to emit until
+   * the member is known". That is false for a field EVERY member shares — `ty` is at index
+   * 1 in both members above — and the refusal's own message said as much, in the
+   * parenthetical it used to carry: "the READ is: `unionCommonField` proves a shared field
+   * sits at one constant slot in every member, and `e.f` on an un-narrowed union compiles
+   * today". A store to that same slot is well-defined for exactly the same reason.
+   *
+   * So the store is emitted now, gated on `unionCommonField` — which answers `undefined`
+   * unless the field is at the SAME index with the SAME widened type in every member. The
+   * cases that genuinely have no single slot are still refused, below.
+   *
+   * This is the shape the compiler's own source is built out of (`e.ty = v` on an `Expr`,
+   * `arrow.isAsync = v`, `operand.awaited = v`), and it held 23 self-hosting blockers.
+   */
+  test("the shared field stores, and every handle observes it — node is the oracle", async () => {
+    const src = `${UNION}
 function annotate(e: E): void { e.ty = "number"; }
 const a: E = { kind: "Num" };
 annotate(a);
 console.log(a.ty ?? "none");
-`);
-    expect(r?.code).toBe("NT1606");
+`;
+    await expectMatches(src, runWithNode(src));
   });
 
-  test("...but it must NOT claim the records are immutable when they are `@@mutable`", () => {
-    const r = rejectionOf(`${UNION}
-function annotate(e: E): void { e.ty = "number"; }
-const a: E = { kind: "Num" };
-annotate(a);
-console.log(a.ty ?? "none");
+  test("...across BOTH members, through a function boundary and an array", async () => {
+    const src = `${UNION}
+function mkN(): E { return { kind: "Num" }; }
+function mkS(): E { return { kind: "Str" }; }
+function stamp(x: E): void { x.ty = "stamped"; }
+const xs: E[] = [mkN(), mkS()];
+for (const x of xs) { stamp(x); }
+let out = "";
+for (const x of xs) { out += x.kind + ":" + (x.ty ?? "none") + " "; }
+console.log(out.trim());
+`;
+    await expectMatches(src, runWithNode(src));
+  });
+
+  /* THE THREE GUARDS, each a case where there really is no one slot — or no permission. */
+  test("a field at a DIFFERENT slot in each member is still refused", () => {
+    const r = rejectionOf(`
+//@@mutable
+interface A { kind: "A"; left: number; ty?: string }
+//@@mutable
+interface B { kind: "B"; ty?: string; right: string }
+type E2 = A | B;
+function f(e: E2): void { e.ty = "x"; }
+console.log(1);
 `);
-    // The old message was the generic "objects are immutable", which is false here:
-    // both members carry `@@mutable`. It has to say what is actually wrong.
+    expect(r?.code).toBe("NT1606");
     expect(r?.message).toContain("union");
   });
 
-  test("...and it must not repeat the `@@mutable` advice the user has ALREADY taken", () => {
-    const r = rejectionOf(`${UNION}
-function annotate(e: E): void { e.ty = "number"; }
-const a: E = { kind: "Num" };
-annotate(a);
-console.log(a.ty ?? "none");
-`);
-    expect(r?.hint ?? "").not.toContain("declare the record `@@mutable`");
-  });
-
-  test("...and it must point at NARROWING, which is the spelling that compiles", () => {
-    const r = rejectionOf(`${UNION}
-function annotate(e: E): void { e.ty = "number"; }
-const a: E = { kind: "Num" };
-annotate(a);
-console.log(a.ty ?? "none");
-`);
-    expect(r?.hint ?? "").toContain("kind");
-  });
-
-  test("THE HINT'S ADVICE COMPILES, and agrees with node", async () => {
-    // The whole point. `test/mutable-records.test.ts` may not assert a hint it has not
-    // run: eight hints in this tree were found to be untrue this session, every one of
-    // them accepted by `tsc` and runnable under node, and only compiling found them.
-    const source = `${UNION}
-function annotate(e: E): void {
-  if (e.kind === "Num") { e.ty = "number"; } else { e.ty = "string"; }
-}
-const a: E = { kind: "Num" };
-annotate(a);
-console.log(a.ty ?? "none");
-const b: E = { kind: "Str" };
-annotate(b);
-console.log(b.ty ?? "none");
-`;
-    await expectMatches(source, await runWithNodeAttrs(source));
-  });
-
-  test("the message's load-bearing claim: the union field READ works, only the STORE is missing", async () => {
-    // The new message says a union field STORE is unimplemented rather than
-    // unrepresentable, and cites the read as proof that the machinery mostly exists.
-    // That claim is asserted here rather than argued: `ty` is at slot 1 in BOTH members,
-    // `unionCommonField` proves the constant slot, and reading it on an un-narrowed
-    // union agrees with node. A message may not cite a fact this file has not run.
-    const source = `${UNION}
-function show(e: E): string { return e.ty ?? "none"; }
-const a: E = { kind: "Num", ty: "number" };
-const b: E = { kind: "Str" };
-console.log(show(a));
-console.log(show(b));
-`;
-    await expectMatches(source, await runWithNodeAttrs(source));
-  });
-
-  test("the hint's OTHER half — a `switch` over the discriminant — compiles too", async () => {
-    // The hint names two spellings. Both are run here, because a hint is only as true as
-    // its least-tested clause.
-    const source = `${UNION}
-function annotate(e: E): void {
-  switch (e.kind) {
-    case "Num": e.ty = "number"; break;
-    case "Str": e.ty = "string"; break;
-  }
-}
-const a: E = { kind: "Num" };
-annotate(a);
-console.log(a.ty ?? "none");
-const b: E = { kind: "Str" };
-annotate(b);
-console.log(b.ty ?? "none");
-`;
-    await expectMatches(source, await runWithNodeAttrs(source));
-  });
-
-  test("the OLD advice is still a dead end — pinned, so the hint can never drift back to it", () => {
-    // `{ ...e, ty: v }` on a TAGGED union is NT2001, not a working program. This is the
-    // assertion that makes the hint change load-bearing rather than cosmetic.
-    const r = rejectionOf(`${UNION}
-function annotate(e: E): E { return { ...e, ty: "number" }; }
-const a: E = { kind: "Num" };
-console.log(annotate(a).ty ?? "none");
-`);
-    expect(r?.code).toBe("NT2001");
-  });
-
-  test("a SINGLE `@@mutable` record still gets the plain in-place path (no regression)", async () => {
-    const source = `
-//@@mutable
-interface Cell { n: number }
-function bump(c: Cell): void { c.n = c.n + 1; }
-const c: Cell = { n: 1 };
-bump(c);
-console.log(c.n);
-`;
-    await expectMatches(source, await runWithNodeAttrs(source));
-  });
-
-  test("an UNDECORATED receiver still gets the `@@mutable` advice — and it compiles", async () => {
+  test("a field ABSENT from one member is still refused", () => {
     const r = rejectionOf(`
-interface Cell { n: number }
-function bump(c: Cell): void { c.n = c.n + 1; }
-const c: Cell = { n: 1 };
-bump(c);
-console.log(c.n);
+//@@mutable
+interface A { kind: "A"; ty?: string }
+//@@mutable
+interface B { kind: "B"; right: string }
+type E2 = A | B;
+function f(e: E2): void { e.ty = "x"; }
+console.log(1);
 `);
     expect(r?.code).toBe("NT1606");
-    expect(r?.hint ?? "").toContain("declare the record `@@mutable`");
-    // ...and step 2 of the loop above, taken on a NON-union receiver, really does work.
-    const fixed = `
-//@@mutable
-interface Cell { n: number }
-function bump(c: Cell): void { c.n = c.n + 1; }
-const c: Cell = { n: 1 };
-bump(c);
-console.log(c.n);
-`;
-    await expectMatches(fixed, await runWithNodeAttrs(fixed));
+  });
+
+  test("an UNDECORATED union is still `objects are immutable` — Stage 29 stands", () => {
+    const r = rejectionOf(`
+interface A { kind: "A"; ty?: string }
+interface B { kind: "B"; ty?: string }
+type E2 = A | B;
+function f(e: E2): void { e.ty = "x"; }
+console.log(1);
+`);
+    expect(r?.code).toBe("NT1606");
+    expect(r?.message).toContain("objects are immutable");
   });
 });
 
