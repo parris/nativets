@@ -1887,8 +1887,9 @@ deletion: a bottom type for `never`; an opaque unusable `Ty`, or reflective walk
 can express, for `object`. Refusing them instead would mean deleting a real `tsc`-checked
 invariant to satisfy a subset limitation.
 
-**`unknown` got that feature.** It no longer erases: it resolves to `UNKNOWN_TY`
-(`src/ast.ts`), a type-level name with **no representation and no inhabitants**. Nothing is
+**`unknown` got that feature.** It no longer erases: it resolves to the opaque `"unknown"`
+arm of `ScalarTy` (`src/ast.ts`), a type-level name with **no representation and no
+inhabitants**. Nothing is
 assignable to it, so no value ever carries the type and codegen is never reached with it —
 that is the mechanism, not a half-finished version of one. A `Ty` that could hold a value
 would need a runtime tag this compiler does not have.

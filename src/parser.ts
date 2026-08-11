@@ -15,7 +15,6 @@ import {
   tagValueIsEncodable, objectFields, isStringLitTy, HOST_MODULES, unionMembers,
   makeGeneralUnionTy, isGeneralUnionArm, generalUnionArmTypeof, extractUnionMembers, unionWidenedMembers,
   resolveStaticFieldReads, collectBindingNames, typeRefTy, expandTypeRef, makeArrayTy, exprLoc,
-  UNKNOWN_TY,
 } from "./ast.ts";
 import type {
   Program, Stmt, Expr, Param, VarDecl, Declarator, Ty, BinaryOp, SwitchCase, ObjectProperty, FuncDecl,
@@ -127,8 +126,8 @@ const AMBIENT_TYPES = new Set([
  * stops being a confusing refusal and becomes a wrong answer.
  *
  * TWO OF THE THREE STILL ERASE TO `number`. `unknown` no longer does: it resolves to the
- * opaque `UNKNOWN_TY` placeholder instead (see the arm at the end of `resolveNamed`, and
- * `UNKNOWN_TY` in src/ast.ts for why an uninhabited type-level name is the whole
+ * opaque `"unknown"` placeholder instead (see the arm at the end of `resolveNamed`, and
+ * the `ScalarTy` comment in src/ast.ts for why an uninhabited type-level name is the whole
  * mechanism rather than a half-finished one). It stays in this set because the set gates
  * the parse-time REFUSAL, and refusing here is fatal to the whole file — measured: with
  * `unknown` removed from this set a linked `src/cli.ts` stops PARSING, taking every
@@ -1054,7 +1053,7 @@ class Parser {
     // the degenerate case where `unknown` was not needed — `handle("x")` was already
     // refused, and with a lying message — but it is capability given up, not merely
     // honesty gained.
-    if (id === "unknown") return UNKNOWN_TY;
+    if (id === "unknown") return "unknown" as Ty;
     return "number" as Ty;
   }
 

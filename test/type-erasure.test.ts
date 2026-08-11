@@ -216,7 +216,7 @@ console.log(g());
   });
 
   /*
-   * `unknown` NO LONGER ERASES — it resolves to the opaque `UNKNOWN_TY` placeholder
+   * `unknown` NO LONGER ERASES — it resolves to the opaque `"unknown"` arm of `ScalarTy`
    * (src/ast.ts), which has no representation and no inhabitants. This is the one member
    * of the residue that got its feature, and it is a TYPE-LEVEL one only: no value can
    * ever carry the type, so codegen is never reached with it.
