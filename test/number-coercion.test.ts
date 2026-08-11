@@ -262,3 +262,55 @@ describe("REFUSED: a value with no node-exact numeric form gets NT1039, never a 
     expect(r?.message).toContain("4:");
   });
 });
+
+/*
+ * THE HINT IS COMPILED, NOT ASSERTED.
+ *
+ * A hint that hands back a DIFFERENT value than the construct it replaces is worse than no
+ * hint — `.at(-1)` was once offered as the fix for `a[-1]` on exactly that mistake. NT1039
+ * makes three factual claims and offers three spellings, and every one of them is checked
+ * against node here rather than trusted.
+ */
+describe("the NT1039 hint's claims are node-true and its spellings compile", () => {
+  const hint = (): string => {
+    const r = rejectionOf("const o = { a: 1 };\nconsole.log(+o);\n");
+    return r?.hint ?? "";
+  };
+
+  // Claim 1: node's own answer for an object / class / Map / Set really is NaN, so
+  // "write `NaN` and it is exact" is exact. Measured on node, since we refuse the
+  // construct — and the literal the hint hands back is compiled on our side.
+  test("`write NaN` is exact for an object, a class instance, a Map and a Set", async () => {
+    expect(hint()).toContain("write `NaN`");
+    expect(
+      runWithNode(
+        "const o = { a: 1 };\nclass C { x: number; constructor(x: number) { this.x = x; } }\n" +
+        'console.log(+o, Number(o), +new C(1), +new Map([["a", 1]]), +new Set([1]));\n',
+      ).stdout,
+    ).toBe("NaN NaN NaN NaN NaN\n");
+    await same("console.log(NaN);\n");
+  });
+
+  // Claim 2: the three "read the number you meant" spellings compile HERE and agree with
+  // node. The hint calls them a different value on purpose; this proves they are at least
+  // available, which is the half a user can act on.
+  test("`+o.count`, `m.size` and `u[0]` all compile and match node", async () => {
+    expect(hint()).toContain("m.size");
+    expect(hint()).toContain("DIFFERENT value");
+    await same(
+      "const o = { count: 3 };\nconsole.log(+o.count);\n" +
+      'const m = new Map<string, number>().set("a", 1);\nconsole.log(m.size);\n' +
+      "const s = new Set<number>().add(1);\nconsole.log(s.size);\n" +
+      "const u = new Uint8Array(2);\nconsole.log(u[0]);\n",
+    );
+  });
+
+  // Claim 3: the Uint8Array warning. node JOINS it, so a one-element array coerces to its
+  // element and a two-element one is NaN — the opposite of the blanket NaN a reader would
+  // assume from the object rows. If node ever stopped doing that the hint would be lying.
+  test("the Uint8Array warning is node-true", () => {
+    expect(hint()).toContain("Uint8Array");
+    expect(runWithNode("console.log(+new Uint8Array([5]), +new Uint8Array([1, 2]));\n").stdout)
+      .toBe("5 NaN\n");
+  });
+});
