@@ -26,6 +26,14 @@ function rejects(src: string): string | null {
   try { emitIR(src); return null; } catch (e) { return e instanceof NTError ? e.diag.code : "throw"; }
 }
 
+/** The whole diagnostic a source is refused with, for the cases that assert its HINT. */
+function refusal(src: string): { code: string; message: string; hint?: string } | null {
+  try { emitIR(src); return null; } catch (e) {
+    if (!(e instanceof NTError)) throw e;
+    return { code: e.diag.code, message: e.diag.message, hint: e.diag.hint };
+  }
+}
+
 const dirs: string[] = [];
 function scratch(): string {
   const d = mkdtempSync(join(tmpdir(), "nativets-hostfs-"));
@@ -606,6 +614,40 @@ describe("the host FFI surface is closed — outside it is NT1028, never half-im
 
   test("readFileSync with a computed encoding", () => {
     expect(rejects(`import { readFileSync } from "node:fs";\nconst enc = "utf8";\nconsole.log(readFileSync("x", enc).length);\n`)).toBe("NT1028");
+  });
+
+  /*
+   * The AMBIENT half of the same surface. NT1028's catalog hint already names exactly
+   * what exists here — "the ambient `process.argv`/`process.env`/`process.exit`/
+   * `process.stdout.write`" — and `process.stdout.foo` was already refused with it. But
+   * `process.platform` (a member READ) and `process.cwd()` (a CALL) went out as bare
+   * NT2001 `typeError`s: no hint, no location, and in the TYPE band rather than the
+   * FEATURE band.
+   *
+   * That last part is not cosmetic. `src/coverage.ts` counts only the NT1xxx band into
+   * its blocker histogram, deliberately — an NT2xxx is a user's type error, not a
+   * missing feature — so an unimplemented host builtin filed as NT2001 was STRUCTURALLY
+   * invisible to the burn-down that is supposed to find it. `src/driver.ts` reads
+   * `process.platform` twice and `src/modules.ts` calls `process.cwd()` once, so the
+   * compiler's own three sites were the ones being hidden.
+   *
+   * The hint is verified TRUTHFUL by the four members it names, each of which has a
+   * differential case against node already: `process.argv` (test/hostio echo-argv,
+   * sum-argv), `process.env` + `process.exit` (env-exit), `process.stdout.write`
+   * (stdout-write).
+   */
+  test("an ambient `process.*` member outside the surface is NT1028, not a bare type error", () => {
+    const d = refusal(`console.log(process.platform);\n`)!;
+    expect(d.code).toBe("NT1028");
+    expect(d.message).toContain("process.platform");
+    expect(d.hint ?? "").toContain("process.argv");
+  });
+
+  test("an ambient `process.*` CALL outside the surface is NT1028 too", () => {
+    const d = refusal(`console.log(process.cwd());\n`)!;
+    expect(d.code).toBe("NT1028");
+    expect(d.message).toContain("process.cwd()");
+    expect(d.hint ?? "").toContain("process.stdout.write");
   });
 
   test("a host builtin is NOT ambient — the name is undefined without the import", () => {

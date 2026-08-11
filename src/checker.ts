@@ -3560,7 +3560,17 @@ class Checker {
         if (!scope.lookup("process")) {
           if (e.object.kind === "Identifier" && e.object.name === "process") {
             if (e.property === "argv") return "string[]";
-            throw typeError(`process.${e.property} is not supported`);
+            // NT1028, the HOST FFI code — not a bare `typeError`. `process.stdout.foo`
+            // three hundred lines down already refuses through `nyi(NYI.HOSTMOD, …)`,
+            // and NT1028's catalog hint is the one that names this exact surface
+            // ("the ambient `process.argv`/`process.env`/`process.exit`/
+            // `process.stdout.write`"), so the member read had no business going out as
+            // an NT2001 with no hint and no location. The band is load-bearing:
+            // `src/coverage.ts` counts only NT1xxx into its blocker histogram — an
+            // NT2xxx is a user's TYPE error, not a missing feature — so an unimplemented
+            // host builtin filed as NT2001 was invisible to the burn-down meant to find
+            // it, including the compiler's own `process.platform` reads in src/driver.ts.
+            throw nyi(NYI.HOSTMOD, `process.${e.property}`, undefined, e.loc);
           }
           if (
             e.object.kind === "MemberExpr" && e.object.object.kind === "Identifier" &&
@@ -4786,7 +4796,9 @@ class Checker {
       e.callee.kind === "MemberExpr" && e.callee.object.kind === "Identifier" &&
       e.callee.object.name === "process" && !scope.lookup("process")
     ) {
-      if (e.callee.property !== "exit") throw typeError(`process.${e.callee.property}() is not supported`);
+      // NT1028 for the same reason the member READ above is: an unimplemented host
+      // builtin is a FEATURE gap, and NT1028's hint is the one that names what exists.
+      if (e.callee.property !== "exit") throw nyi(NYI.HOSTMOD, `process.${e.callee.property}()`, undefined, e.loc);
       if (e.args.length > 1) throw typeError("process.exit(code?) takes at most one argument");
       if (e.args.length === 1 && this.type(e.args[0]!, scope) !== "number") throw typeError("process.exit: code must be a number");
       return "void";

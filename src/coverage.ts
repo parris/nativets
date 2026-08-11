@@ -29,33 +29,6 @@ export interface CoverageReport {
 type Spec = { code: string; milestone: string; hint: string };
 
 /**
- * Add `n` to the histogram bucket for `spec.code`, inserting it when it is new, and answer
- * the resulting table.
- *
- * PURE, and returning the Map rather than mutating one, because both halves of the old
- * spelling were outside the subset this compiler must compile ITSELF in:
- *   - `b.count++` on a fetched entry is NT1606 (`objects are immutable`), and
- *   - `found.set(key, b)` in statement position is the discarded-persistent-mutator class
- *     (see test/discarded-mutator.test.ts) — a nativets `Map.set` answers a NEW map and
- *     leaves the receiver alone, so the line was a guaranteed no-op there while working
- *     under bun. It was the one `coverage.ts` entry on that census.
- * Rebinding at the call site was not available either: `flag` was an ARROW closing over
- * `found`, and a write to a captured binding is NT1031. A top-level function taking the
- * table in and handing it back is the shape that has no such receiver problem.
- *
- * Identical under bun, where `.set` answers the receiver, so `found = bump(found, …)` is a
- * self-assignment. The FIRST spec to arrive under a code owns the label/milestone/hint —
- * the same rule the two old spellings agreed on.
- */
-function bumpBlocker(found: Map<string, Blocker>, spec: Spec, feature: string, n: number): Map<string, Blocker> {
-  const prev = found.get(spec.code);
-  if (prev === undefined) {
-    return found.set(spec.code, { code: spec.code, feature, milestone: spec.milestone, hint: spec.hint, count: n });
-  }
-  return found.set(spec.code, { code: prev.code, feature: prev.feature, milestone: prev.milestone, hint: prev.hint, count: prev.count + n });
-}
-
-/**
  * Classify a per-statement parse failure into a blocker spec + feature label.
  *
  * A feature-level NYI thrown by the parser (a general union type, an optional call, …)
@@ -245,6 +218,44 @@ export function coverage(source: string, entryPath?: string): CoverageReport {
   const compiles = parsed && checkPassed && parseFailures === 0 && stripped.length === 0;
   const blockers = [...found.values()].sort((a, b) => a.milestone.localeCompare(b.milestone) || b.count - a.count);
   return { parsed, compiles, statements, firstError, blockers };
+}
+
+/**
+ * Add `n` to the histogram bucket for `spec.code`, inserting it when it is new, and answer
+ * the resulting table.
+ *
+ * PURE, and returning the Map rather than mutating one, because both halves of the old
+ * spelling were outside the subset this compiler must compile ITSELF in:
+ *   - `b.count++` on a fetched entry is NT1606 (`objects are immutable`), and
+ *   - `found.set(key, b)` in statement position is the discarded-persistent-mutator class
+ *     (see test/discarded-mutator.test.ts) — a nativets `Map.set` answers a NEW map and
+ *     leaves the receiver alone, so the line was a guaranteed no-op there while working
+ *     under bun. It was the one `coverage.ts` entry on that census.
+ * Rebinding at the call site was not available either: `flag` was an ARROW closing over
+ * `found`, and a write to a captured binding is NT1031. A top-level function taking the
+ * table in and handing it back is the shape that has no such receiver problem.
+ *
+ * Identical under bun, where `.set` answers the receiver, so `found = bump(found, …)` is a
+ * self-assignment. The FIRST spec to arrive under a code owns the label/milestone/hint —
+ * the same rule the two old spellings agreed on.
+ *
+ * DECLARED BELOW `coverage`, not above it, and that is deliberate. `Blocker` is an IMPORTED
+ * type, so in the STANDALONE (unlinked) view — the left-hand column of
+ * test/selfhost-ratchet.test.ts — it resolves to nothing and falls through the parser's
+ * last resort to `number`. Any function that CONSTRUCTS a Blocker therefore type-errors
+ * there, and this one placed above `coverage` moved that module's standalone blocker from
+ * the honest `unlinked-import artifact (standalone view is blind past this point)` to a
+ * `.set value expects number` invented entirely by the missing import. The ratchet's own
+ * advisory said as much — "the frontier did not move; your edit changed which construct is
+ * hit first". Below `coverage`, the blind column keeps reporting its blindness. Function
+ * declarations hoist, so the call sites above are unaffected in either toolchain.
+ */
+function bumpBlocker(found: Map<string, Blocker>, spec: Spec, feature: string, n: number): Map<string, Blocker> {
+  const prev = found.get(spec.code);
+  if (prev === undefined) {
+    return found.set(spec.code, { code: spec.code, feature, milestone: spec.milestone, hint: spec.hint, count: n });
+  }
+  return found.set(spec.code, { code: prev.code, feature: prev.feature, milestone: prev.milestone, hint: prev.hint, count: prev.count + n });
 }
 
 /** Render a coverage report as a human-readable string. */

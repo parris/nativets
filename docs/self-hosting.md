@@ -4716,13 +4716,22 @@ Found while a build-perf lane was checking that it had not planted a blocker of 
 
 The checker allows exactly `process.argv`, `process.env.NAME`, `process.exit` and
 `process.stdout.write`; anything else takes the `process.${e.property} is not supported`
-path (`src/checker.ts` ~2494). Confirmed directly rather than inferred:
+path. Confirmed directly rather than inferred:
 
 ```
 $ echo 'console.log(process.platform);' > /tmp/plat.ts
 $ bun run src/cli.ts run /tmp/plat.ts
-error[NT2001]: process.platform is not supported
+error[NT1028]: process.platform is not supported yet at 1:13
 ```
+
+**That code used to be `NT2001`, with no hint and no location, and the band was wrong in a
+way that mattered.** `src/coverage.ts` counts only the `NT1xxx` band into its blocking-features
+histogram — deliberately, because an `NT2xxx` is a user's *type error*, not a missing feature —
+so an unimplemented host builtin filed as `NT2001` reached `firstError` and *never appeared in
+the histogram at all*. The burn-down instrument was structurally blind to exactly the three
+sites this section is about. Both paths now go through `nyi(NYI.HOSTMOD, …)`, the same NT1028
+its `process.stdout.*` neighbour has always used, and NT1028's hint is the one that already
+names this surface. Pinned in `test/hostfs.test.ts` ("the host FFI surface is closed").
 
 So **`driver.ts` was already outside the subset before that lane touched it**, and the
 per-module tables above have never shown it, because its *first* blocker is `NT2001`
@@ -4733,8 +4742,8 @@ all along is still invisible until the wall moves.
 
 Two things follow for whoever clears `ast.ts`'s `NT2001`:
 
-- expect `driver.ts` to surface `NT2001` again immediately, from its own `process.platform`,
-  not to jump to the next tier;
+- expect `driver.ts` to surface its own `process.platform` immediately (now `NT1028`), not to
+  jump to the next tier;
 - it needs a real decision, not a mechanical fix. Host-platform branching is exactly what a
   cross-compiling driver is *for*, so the options are a `process.platform` builtin, a
   compile-time target constant, or hoisting both branches into the runtime. Worth settling
