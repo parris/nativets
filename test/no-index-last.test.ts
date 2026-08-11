@@ -121,12 +121,14 @@ const UNASSERTED: Record<string, number> = {}; // EMPTY — keep it that way.
  * claim and not a check (see the correction in the header). May shrink, never grow; a
  * file that reaches zero is DELETED rather than set to 0.
  *
- * `codegen.ts` is 8, not the 6 the narrower scan reported: two of them live inside
- * template substitutions.
+ * 6 -> 5 when the finalizer lane gave `finallyStack` an `innermostFinally()` helper — the
+ * same length-test shape `innermostHandler` already had, for the same reason: the
+ * `return`-inside-a-`try` path spelled `finallyStack[finallyStack.length - 1]` while the
+ * EMPTY stack (a `return` outside any `try`) is the ordinary case one line above it.
  */
 const ASSERTED: Record<string, number> = {
   "checker.ts": 3,
-  "codegen.ts": 6,
+  "codegen.ts": 5,
   "driver.ts": 1,
   "lexer.ts": 2,
   "parser.ts": 2,

@@ -1,11 +1,11 @@
 {
   "recordedAt": {
     "date": "2026-08-11",
-    "rev": "908961b"
+    "rev": "55c4794"
   },
   "modules": {
     "ast.ts": {
-      "sha256": "72741320ee4e871f",
+      "sha256": "7d406b584cb90720",
       "standalone": {
         "stage": "clear",
         "code": "",
@@ -18,7 +18,7 @@
       }
     },
     "checker.ts": {
-      "sha256": "7a1dc66af23e912d",
+      "sha256": "e0eac83cfe258525",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -27,7 +27,7 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] Property 'diag' does not exist on number at L:C"
+        "message": "[NT2001] Property 'diag' does not exist on unknown at L:C"
       }
     },
     "cli.ts": {
@@ -45,7 +45,7 @@
       }
     },
     "codegen.ts": {
-      "sha256": "bafa3275bed2b781",
+      "sha256": "a338b757bc421e53",
       "standalone": {
         "stage": "check",
         "code": "NT1012",
@@ -54,11 +54,11 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] Property 'diag' does not exist on number at L:C"
+        "message": "[NT2001] Property 'diag' does not exist on unknown at L:C"
       }
     },
     "coverage-preprocess.ts": {
-      "sha256": "8f468e60ef0f1525",
+      "sha256": "bc2dd3293fb07b39",
       "standalone": {
         "stage": "clear",
         "code": "",
@@ -71,7 +71,7 @@
       }
     },
     "coverage.ts": {
-      "sha256": "b94d87bfc3028e16",
+      "sha256": "39476e082e4e8320",
       "standalone": {
         "stage": "check",
         "code": "NT1003",
@@ -85,7 +85,7 @@
       }
     },
     "diagnostics.ts": {
-      "sha256": "3517de58d673ba5e",
+      "sha256": "c3a9ee1cfbf7e97d",
       "standalone": {
         "stage": "clear",
         "code": "",
@@ -98,7 +98,7 @@
       }
     },
     "driver.ts": {
-      "sha256": "9a3b75ea2f6311e1",
+      "sha256": "97e2608c847c04dc",
       "standalone": {
         "stage": "check",
         "code": "NT1003",
@@ -112,7 +112,7 @@
       }
     },
     "lexer.ts": {
-      "sha256": "3b49856343a0861c",
+      "sha256": "4d9978f9cb1bc5a0",
       "standalone": {
         "stage": "clear",
         "code": "",
@@ -125,7 +125,7 @@
       }
     },
     "modules.ts": {
-      "sha256": "af0c14bf401ef8b8",
+      "sha256": "1f9bf67a77528f08",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -138,7 +138,7 @@
       }
     },
     "ownership.ts": {
-      "sha256": "fd95f26f4178faba",
+      "sha256": "84f73899e55fe24e",
       "standalone": {
         "stage": "check",
         "code": "NT1003",
@@ -148,11 +148,11 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] Property 'diag' does not exist on number at L:C"
+        "message": "[NT2001] Property 'diag' does not exist on unknown at L:C"
       }
     },
     "parser.ts": {
-      "sha256": "477c4a423b0b2c74",
+      "sha256": "251476258d37360c",
       "standalone": {
         "stage": "check",
         "code": "NT2001",

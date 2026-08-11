@@ -189,6 +189,28 @@ A minimal actor runtime in C, driven from codegen. Build order (from research):
   unwinds every scope between itself and its target (`test/break-drops.test.ts`, measured at two
   scales: switch-break 100→1000 and continue 100→1000 became 0/0). Loop entries carry SEPARATE
   break and continue depths, because a `switch` inherits the enclosing loop's `continue` target.
+- **Closed:** a `break`/`continue`/`return` that CROSSES a `finally` now runs it. Two silent wrong
+  answers, both exiting 0 with output short by a line. `break`/`continue` branched straight to the
+  loop label past the finalizer entirely (`for (…) { try { break } finally { log("fin") } }` — node
+  prints `fin`, we printed nothing); `return` went through the finalizer's mode dispatch and was
+  believed correct, but with TWO nested finalizers the inner dispatch did the `ret` itself, from a
+  block sitting inside the outer `try`, so the outer finalizer was skipped. The finalizer dispatch
+  now carries one id per crossing exit and CHAINS: the resume block after finalizer N finishes the
+  unwinding N was blocking, then hands the exit to N-1, innermost first, and the drops interleave
+  with the finalizers rather than all running first. A finalizer that completes abruptly itself
+  emits no dispatch at all, which is ECMAScript's `UpdateEmpty` (the inner completion overrides the
+  pending one) falling out for free — checked against node, both directions. `test/finally-jump.test.ts`.
+- **Still open, and MEASURED:** a `return` inside a `try` that has a `finally` frees **nothing**.
+  The ordinary return path is `coerce` → `emitDrops(s.drops)` → `ret`; the finally path stashes
+  the value, stores mode 1 and branches, and neither it nor the dispatch that finally does the
+  `ret` emits a drop. Every owned local of the frame leaks, once per call: **200 calls → 200,
+  2000 → 2000**, with the same function minus the `finally` at 0 and the same function with a
+  `catch` and no `finally` at 0 (`test/finally-jump.test.ts`, which ASSERTS the leaking numbers
+  so the day it is fixed the pin goes red). The drops cannot simply move to the return site — the
+  finalizer may read those locals, so that trades a leak for a use-after-free. They belong in the
+  block that does the `ret`, which is shared by every `return` in the `try` while each carries its
+  own `s.drops` and its own string-transfer decision, and which now also has to survive the
+  forwarding chain through nested finalizers. That is a stage, not a line.
 - **Still open:** values escaping through a `throw` out of a block, temporaries
   in non-chain positions (call arguments), chain temporaries whose method hands the receiver
   back, array/object ELEMENTS (an array does not recursively
