@@ -1258,6 +1258,16 @@ class FnGen {
    * on. Per function: `reset` puts it back, and the slots are per-`try` allocas anyway.
    */
   private jumpMode = 2;
+  /**
+   * The innermost live finalizer, or null when nothing encloses. Spelled as a length
+   * test for the reason `innermostHandler` is: an EMPTY stack is the ordinary case, and
+   * `xs[xs.length - 1]` forms index -1 there, which node answers `undefined` and nativets
+   * PANICS on (test/no-index-last.test.ts). One helper so the call sites cannot drift.
+   */
+  private innermostFinally(): FinallyFrame | null {
+    const n = this.finallyStack.length;
+    return n > 0 ? this.finallyStack[n - 1]! : null;
+  }
   /** Abrupt exits parked on a live finalizer, keyed by `FinallyFrame.id`. */
   private jumpExits: PendingExit[] = [];
   /** Next `FinallyFrame.id`. */
@@ -1963,9 +1973,10 @@ class FnGen {
           this.terminate(`br label %${h.done}`);
           return;
         }
-        if (this.finallyStack.length > 0) {
+        const fin = this.innermostFinally();
+        if (fin !== null) {
           // return inside a try/catch with a finally: stash value, run finally (mode=1)
-          const f = this.finallyStack[this.finallyStack.length - 1]!;
+          const f = fin;
           // Coerced to the DECLARED return type, exactly as the ordinary return path
           // below is. Without this the stash STORED the raw value under the declared
           // type's LLVM type: `function g(): string | boolean { try { return "hi" } finally {…} }`
@@ -2365,9 +2376,31 @@ class FnGen {
             const retLbl = this.label("finret");
             this.terminate(`br i1 ${isRet}, label %${retLbl}, label %${endLbl}`);
             this.to(this.block(retLbl));
+            // FORWARD RATHER THAN `ret` when another finalizer still encloses this one.
+            // This block sits INSIDE the outer `try` — it is emitted while generating it —
+            // so returning from here jumped clean over the outer finalizer, which node
+            // runs. That was a live silent wrong answer with `return` and TWO finalizers,
+            // exactly the defect `break` had, and it survived because `return` was
+            // verified against a single `finally` only. So: copy the stashed value into
+            // the outer frame's slot, re-arm mode 1 there, and hand the return on. The
+            // outer dispatch repeats the test, which is what makes it a CHAIN — three
+            // deep works for the same reason two does.
+            //
+            // `finallyStack` has already popped THIS frame (just above), so the innermost
+            // entry left is precisely the next finalizer out.
+            const outerFin = this.innermostFinally();
+            if (outerFin !== null) {
+              if (retSlot && outerFin.retSlot) {
+                const fv = this.fresh();
+                this.emit(`${fv} = load ${llvmTy(this.retTy)}, ptr ${retSlot}`);
+                this.emit(`store ${llvmTy(this.retTy)} ${fv}, ptr ${outerFin.retSlot}`);
+              }
+              this.emit(`store double ${llvmDouble(1)}, ptr ${outerFin.modeSlot}`);
+              this.terminate(`br label %${outerFin.finallyLbl}`);
+            }
             // In `main` this block is unreachable (no top-level `return`), but it must still
             // type-check against `define i32 @main` — see `inMain`.
-            if (this.inMain) this.terminate("ret i32 0");
+            else if (this.inMain) this.terminate("ret i32 0");
             else if (this.retTy === "void" || !retSlot) this.terminate("ret void");
             else { const rv = this.fresh(); this.emit(`${rv} = load ${llvmTy(this.retTy)}, ptr ${retSlot}`); this.terminate(`ret ${llvmTy(this.retTy)} ${rv}`); }
           }

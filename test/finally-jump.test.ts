@@ -336,6 +336,85 @@ console.log("done");`)).toBe("caught boom\nfin 0\ndone\n");
   });
 });
 
+/*
+ * ============================================================================
+ * THE PRE-EXISTING BUG THIS LANE FOUND — `return` ACROSS TWO FINALIZERS
+ * ============================================================================
+ *
+ * `return` was believed correct because it already went through the mode dispatch, and
+ * with ONE finalizer it is. With two it was the same silent wrong answer `break` had:
+ *
+ *   function f() { try { try { return 7; } finally { log("inner"); } } finally { log("outer"); } }
+ *   node -> "inner" "outer" 7        nativets (before) -> "inner" 7
+ *
+ * The inner finalizer's dispatch did the `ret` ITSELF, from a basic block sitting inside
+ * the outer `try` — so the outer finalizer was jumped clean over, and the program exited
+ * 0 with output short by one line. It is the identical defect one stack over, and it is
+ * why the mode-1 arm now forwards to the next live finalizer instead of returning, in
+ * the same shape `break` and `continue` forward.
+ */
+describe("return across nested finallys", () => {
+  test("a return crossing two finallys runs both, innermost first", async () => {
+    expect(await sameAsNode(`function f(): number {
+  try {
+    try { return 7; } finally { console.log("inner"); }
+  } finally { console.log("outer"); }
+}
+console.log(f());`)).toBe("inner\nouter\n7\n");
+  });
+
+  test("a return crossing three finallys runs all three", async () => {
+    expect(await sameAsNode(`function f(): string {
+  try {
+    try {
+      try { return "v"; } finally { console.log("a"); }
+    } finally { console.log("b"); }
+  } finally { console.log("c"); }
+}
+console.log(f());`)).toBe("a\nb\nc\nv\n");
+  });
+
+  // A `void` function has no return slot at all, so the forwarding must not assume one.
+  test("a void return crossing two finallys runs both", async () => {
+    expect(await sameAsNode(`function f(): void {
+  try {
+    try { console.log("body"); return; } finally { console.log("inner"); }
+  } finally { console.log("outer"); }
+}
+f();
+console.log("done");`)).toBe("body\ninner\nouter\ndone\n");
+  });
+
+  // The forwarded value has to survive the hand-off: the outer finalizer runs BETWEEN
+  // the inner dispatch and the `ret`, and it writes to the same locals.
+  test("the returned value survives the outer finalizer", async () => {
+    expect(await sameAsNode(`function f(): number {
+  let v = 1;
+  try {
+    try { v = 7; return v; } finally { v = 8; console.log("inner " + v); }
+  } finally { v = 9; console.log("outer " + v); }
+}
+console.log(f());`)).toBe("inner 8\nouter 9\n7\n");
+  });
+
+  // And the two mechanisms have to share a finalizer: a `return` and a `break` both
+  // crossing the same pair, each resumed under its own dispatch id.
+  test("a return and a break cross the same two finallys", async () => {
+    expect(await sameAsNode(`function f(): number {
+  for (let i = 0; i < 4; i++) {
+    try {
+      try {
+        if (i === 1) { return 7; }
+        if (i === 0) { continue; }
+      } finally { console.log("inner " + i); }
+    } finally { console.log("outer " + i); }
+  }
+  return 9;
+}
+console.log(f());`)).toBe("inner 0\nouter 0\ninner 1\nouter 1\n7\n");
+  });
+});
+
 /* Every loop form pushes its own `break`/`continue` target, so every loop form is its own
  * chance to have forgotten the finalizer depth on the entry. */
 describe("every loop form", () => {
