@@ -162,4 +162,65 @@ console.log(f());`;
     expect(nonEmpty.length).toBe(2);
     expect(nonEmpty[1]).toEqual({ kind: "BlockDrops", names: ["c"] });
   });
+
+  /*
+   * A `try`/`catch`/`finally` BLOCK IS A BLOCK, and its linear locals were never freed.
+   *
+   * `scoped()` is called on all three lists, so `declaredLinear` did find the array — but
+   * it is then intersected with `this.linear`, and `collectLinear` (which builds that set
+   * for the whole frame) had no `TryStmt` case at all. Its sibling `collectVarTys`, a few
+   * lines above it, does have one. So the name was never linear, the intersection was
+   * empty, and the marker carried nothing: one array leaked per execution of the `try`.
+   *
+   * MEASURED IN A LOOP, at two scales, and that is the whole point of the shape. The same
+   * body written straight-line reports 0 — not because it does not leak, but because the
+   * frame exits and the counter is read after everything is already gone. A leak
+   * proportional to work is only visible against work.
+   */
+  test("a linear local declared inside a try block is freed, once per execution", async () => {
+    const body = (n: number): string => `
+let acc = 0;
+for (let i = 0; i < ${n}; i++) {
+  try {
+    const a: number[] = [1, 2, 3];
+    acc = acc + a.length;
+  } catch (e) {
+    acc = acc + 1;
+  }
+}
+console.log(acc);
+console.log(__arrLive());`;
+    const small = await compileAndRun(body(200));
+    expect(small.exitCode).toBe(0);
+    expect(small.stdout).toBe("600\n0\n");
+    // …and it does not GROW with the work, which is the property a single scale cannot see.
+    const large = await compileAndRun(body(1000));
+    expect(large.exitCode).toBe(0);
+    expect(large.stdout).toBe("3000\n0\n");
+  });
+
+  test("a linear local declared inside a catch and a finally block is freed too", async () => {
+    const body = (n: number): string => `
+function boom(i: number): number { if (i > -1) throw "x"; return i; }
+let acc = 0;
+for (let i = 0; i < ${n}; i++) {
+  try {
+    acc = acc + boom(i);
+  } catch (e) {
+    const c: number[] = [1, 2];
+    acc = acc + c.length;
+  } finally {
+    const f: number[] = [3];
+    acc = acc + f.length;
+  }
+}
+console.log(acc);
+console.log(__arrLive());`;
+    const small = await compileAndRun(body(200));
+    expect(small.exitCode).toBe(0);
+    expect(small.stdout).toBe("600\n0\n");
+    const large = await compileAndRun(body(1000));
+    expect(large.exitCode).toBe(0);
+    expect(large.stdout).toBe("3000\n0\n");
+  });
 });

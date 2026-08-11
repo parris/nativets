@@ -1751,6 +1751,18 @@ function collectLinear(stmts: Stmt[], out: Set<string>): void {
       case "ForOfStmt": collectLinear(s.body, out); break;
       case "SwitchStmt": for (const c of s.cases) collectLinear(c.body, out); break;
       case "BlockStmt": collectLinear(s.body, out); break;
+      // A `try` was MISSING here, and it was a LEAK rather than a refusal: `scoped()` is
+      // called on all three lists, so `declaredLinear` did find an array declared inside
+      // one — but `scoped` then intersects that with `this.linear`, which is what this
+      // function builds, so the name was never linear and the block's drop marker carried
+      // nothing. One array (or object, or closure env) leaked per execution of the `try`.
+      // `collectVarTys` directly above already descends here; these two walk the same tree
+      // for the same frame and had disagreed about it since the `try` lowering landed.
+      case "TryStmt":
+        collectLinear(s.block, out);
+        if (s.handler) collectLinear(s.handler, out);
+        if (s.finalizer) collectLinear(s.finalizer, out);
+        break;
       case "MultiStmt": collectLinear(s.stmts, out); break;
       default: break;
     }
