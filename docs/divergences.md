@@ -3838,6 +3838,58 @@ along with the requirement that the hint's own suggested fix compiles and matche
 widen `string` + `undefined` into `string | undefined`. The `if`/`return` spelling of the
 same function compiles.
 
+### `{ __proto__: v }` is refused (`NT1038`) — it is the prototype setter, and we have no prototypes
+
+```ts
+console.log(JSON.stringify({ __proto__: 1 }));                  // node: {}   nativets, before: {"__proto__":1}, exit 0
+console.log(Object.keys({ __proto__: 1, other: 2 }).join("|")); // node: other  nativets, before: __proto__|other
+```
+
+`__proto__` written as `PropertyName : AssignmentExpression` inside an object literal is not a
+property at all. ECMAScript **B.3.1** (*`__proto__` Property Names in Object Initializers*)
+rewrites that one production into a `[[SetPrototypeOf]]`, so the key never becomes an own
+property and never appears in `Object.keys`, `for-in`, `Object.values` or `JSON.stringify`. We
+built an ordinary field, printed it, and exited 0 — the silent-wrong-answer shape, found by the
+node-differential fuzz lane.
+
+**It is unimplementable here, not merely unimplemented.** A nativets object is a flat record
+whose slot layout is fixed at compile time from its static type, with no prototype link and no
+place to put one; class methods are resolved from the type tag rather than carried by the value.
+All three shapes of the setter need exactly the chain we do not have:
+
+| written | what node does | why we cannot |
+|---|---|---|
+| `{ __proto__: obj }` | `[[Prototype]] = obj` | a later `o.b` has to resolve on `obj` |
+| `{ __proto__: null }` | drops `Object.prototype` — `"toString" in o` turns **false** | our `in` answers from `OBJECT_PROTO_KEYS` (`src/ast.ts`), a compile-time list with no per-object exception |
+| `{ __proto__: 1 }` | a primitive is ignored — a pure no-op | *this one alone is expressible* (drop the key), but such a literal is an obfuscated `{}`, and compiling it would leave a value that is evaluated, owned by nobody and stored nowhere in the one path where every other property MOVES into the object |
+
+Refusing the production **whole** is both the honest answer and the only uniform one; limping
+through the third row would buy no real program and add a discarded-temporary case to the
+literal path. Note that node's third row is *also* where a would-be fix is most tempting and
+least useful.
+
+**Refused in the parser** (`parseObjectLiteral`), which is unusual for an `NT1xxx` and
+deliberate: it is the last point that still knows the production. The shorthand desugars to
+`{ key, value: Identifier(key) }`, which is indistinguishable downstream from
+`{ __proto__: __proto__ }` — and those two disagree in node.
+
+**Deliberately narrow — B.3.1 rewrites only that one production, so the neighbours are ordinary
+properties in node and still compile here, unchanged:**
+
+| spelling | node | nativets |
+|---|---|---|
+| `{ __proto__ }` shorthand | ordinary property (`IdentifierReference`, not `PropertyName :`) | **compiles, matches node** — this is what `NT1038`'s hint sends you to |
+| `{ ["__proto__"]: v }` | ordinary property | `NT0001` — computed keys are unsupported generally, not a wrong answer |
+| `JSON.parse('{"__proto__":1}')` | ordinary property (`CreateDataProperty`) | unaffected |
+| `"__proto__" in o` | `true` | `true` — `OBJECT_PROTO_KEYS` already lists it |
+
+**Still open, and NOT closed by this refusal:** `o.__proto__` as a member expression. In node
+that is the `Object.prototype` accessor pair, so a *read* yields the prototype and a *write*
+sets it — `o.__proto__ = {b:2}` creates no own property either. `docs/divergences.md`'s
+Record/dict section already records that `o["__proto__"]` answers an object. Both `{ __proto__ }`
+and every clause of `NT1038`'s hint were compiled and byte-diffed against node;
+`test/fuzz-diff.test.ts` holds the refusal contract and that proof.
+
 ### Host FFI (SH4) — `node:fs` / `node:child_process`
 
 A `node:` import binds a **compiler builtin**, not a file: there is no `node_modules`, no JS to
