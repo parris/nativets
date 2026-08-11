@@ -192,7 +192,7 @@ describe("fuzz findings — the lexer's escape table", () => {
    * `\n \t \r \\ \' \" \` \0`, `\xNN`, `\uNNNN`, `\u{NNNNN}`, an unknown escape, and the
    * octal refusal (NT0001).
    */
-  it.failing("`\\b`, `\\f` and `\\v` decode to U+0008 / U+000C / U+000B", async () => {
+  it("`\\b`, `\\f` and `\\v` decode to U+0008 / U+000C / U+000B", async () => {
     await expectSameBytes([
       'console.log("\\b".charCodeAt(0));',  // node 8,  ours 98  ("b")
       'console.log("\\f".charCodeAt(0));',  // node 12, ours 102 ("f")
