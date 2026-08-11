@@ -556,15 +556,33 @@ class Analyzer {
    */
   private checkMutableArgs(e: { callee: Expr; args: Expr[] }): void {
     if (this.mutableArgs.size === 0 && this.mutableArgProps.size === 0) return;
-    const [name, idx] = e.callee.kind === "Identifier"
-      ? [e.callee.name, this.mutableArgs.get(e.callee.name)]
-      : e.callee.kind === "MemberExpr"
-        ? [e.callee.property, this.mutableArgProps.get(e.callee.property)]
-        : ["", undefined];
+    // Two PLAIN bindings rather than a destructured pair. `[name, idx]` is a
+    // heterogeneous tuple — `string` in slot 0, `Set<number> | undefined` in slot 1 —
+    // and nativets has no tuple type, so an array literal has to have one element type
+    // (NT2001 "array elements must share a type"). The `else` arm's `["", undefined]`
+    // falls out with it: `idx === undefined` returns on that path anyway, exactly as
+    // before.
+    let name = "";
+    let idx: Set<number> | undefined = undefined;
+    if (e.callee.kind === "Identifier") {
+      name = e.callee.name;
+      idx = this.mutableArgs.get(e.callee.name);
+    } else if (e.callee.kind === "MemberExpr") {
+      name = e.callee.property;
+      idx = this.mutableArgProps.get(e.callee.property);
+    }
     if (idx === undefined) return;
     for (const i of idx) {
-      const a = e.args[i];
-      if (a === undefined || a.kind !== "Identifier") continue;
+      // A LENGTH test rather than `a === undefined`, and it is the stronger spelling in
+      // both languages. Comparing an `Expr` union against `undefined` is NT2001 (nativets
+      // types an element read as the element type, not `T | undefined`) — and the read
+      // that would have produced the `undefined` PANICS out of range here (Stage 41),
+      // so the old guard could never have run. `idx` holds parameter positions, so `i`
+      // is never negative, and a call's `args` is dense: this admits and skips exactly
+      // what the `undefined` test did under node.
+      if (i >= e.args.length) continue;
+      const a = e.args[i]!;
+      if (a.kind !== "Identifier") continue;
       if (this.borrowParams.has(a.name) && !this.mutableParams.has(a.name)) {
         this.report({
           code: OWN_CODES.MUTATE_THROUGH_BORROW,
