@@ -905,10 +905,15 @@ interface PendingExit {
  * a first attempt that null-initialised every `ptr` local moved corpus IR +3.76%.
  */
 function droppableNames(body: Stmt[]): Set<string> {
-  const out = new Set<string>();
+  // `out = out.add(…)`, not `out.add(…)`: `Set` is PERSISTENT in the subset `src/` has to
+  // stay inside, so the bare call returns a new set and leaves the receiver untouched —
+  // a self-hosted build would compute an EMPTY droppable set and re-open the double free
+  // this function exists to close. The census lint (test/discarded-mutator.test.ts) is the
+  // only instrument that catches it, since under bun the two spell the same thing.
+  let out = new Set<string>();
   const walk = (n: unknown): void => {
     if (Array.isArray(n)) {
-      for (const name of dropsOf(n as Stmt[])) out.add(name);
+      for (const name of dropsOf(n as Stmt[])) out = out.add(name);
       for (const x of n) walk(x);
       return;
     }
