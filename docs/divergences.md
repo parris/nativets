@@ -1472,13 +1472,43 @@ to the character `"1"` (`charCodeAt` 49) where node says 1. `\1`…`\7` are ECMA
 B.1.2 **LegacyOctalEscapeSequence**, and so is `\0` when a decimal digit follows it —
 `"\01"` is U+0001, *not* a NUL then `"1"`.
 
-These are **not** a divergence: they are SyntaxErrors in strict mode, and a TypeScript module
-is strict, so node refuses them too (`SyntaxError: Octal escape sequences are not allowed in
-strict mode`). They are `NT0001`, the ordinary syntax band. A bare `\0` is untouched — it is
-the NUL escape, legal in strict mode, and refused as `NT1705` for its own reason.
+They are `NT0001`, the ordinary syntax band. A bare `\0` is untouched — it is the NUL escape,
+legal in strict mode, and refused as `NT1705` for its own reason.
 
-`\8` and `\9` are **NonOctalDecimalEscapeSequence**, decode to `"8"`/`"9"` exactly as node
-does, and stay accepted (test262 `legacy-non-octal-escape-sequence-8-non-strict.js`).
+**These ARE a divergence for a script-shaped file, and the earlier claim that they are not was
+wrong.** That claim read: "they are SyntaxErrors in strict mode, and a TypeScript module is
+strict, so node refuses them too". The premise is true and the conclusion does not follow,
+because **whether node treats a `.ts` file as strict depends on the file's shape**, and the
+fixtures this rule is tested on are the shape that is *not* strict. Measured, all four
+combinations:
+
+| file | `"a\1b"` under node | `"a\8b"` under node | nativets |
+|---|---|---|---|
+| **script** — no `import`/`export`, no `"use strict"` | **prints `1`, exit 0** | prints `a8b`, exit 0 | `\1` **refused** `NT0001`; `\8` → `a8b` |
+| **module** — any `import`/`export` (or `"use strict"`) | `SyntaxError` | `SyntaxError` | `\1` refused `NT0001`; `\8` **accepted** |
+
+node's type-stripping loads a bare `.ts` as CommonJS, which is sloppy mode; an `export` makes it
+a module, which is strict. Since a divergence fixture is normally a single file with no
+`import`/`export`, `node <file>` — this project's oracle, literally — runs it **sloppy**. So:
+
+- **`\1`…`\7` refuse a program node accepts.** That is a real refusal and it belongs in this
+  document as one, which is why this entry no longer claims exemption. The refusal itself is
+  kept — the value half of the original finding stands (node decodes `"a\1b"` to U+0001, and we
+  used to produce the character `"1"`, `charCodeAt` 49, which was a silent wrong answer), and
+  refusing a deprecated Annex B form is the safe direction.
+- **`\8` and `\9` are the mirror gap.** They are **NonOctalDecimalEscapeSequence**, decode to
+  `"8"`/`"9"`, and that matches node in the script shape (test262
+  `legacy-non-octal-escape-sequence-8-non-strict.js` — note the cited file is the *non-strict*
+  one). In the module shape node rejects them (`SyntaxError: \8 and \9 are not allowed in strict
+  mode`) and we accept. Not a wrong answer in either shape, but it is us being more permissive
+  than node, and it is the same strictness question answered the other way.
+
+The inconsistency worth naming: the old text reasoned "the file is strict" for `\1` and cited a
+**non-strict** test262 case for `\8`, two lines apart. Both cannot be the oracle for one file.
+`test/nul-string.test.ts` carries the same claim in its header comment ("a TypeScript module IS
+strict … Verified against node run as ESM") while its own fixtures are script-shaped and it
+asserts only the `NT` code, never a node-differential run — that comment wants the same
+correction.
 
 > Fixing this needed `\uHHHH` / `\u{H+}` to exist at all: `\u` was not an escape the lexer
 > knew, so it fell through to "an unknown escape is the character itself", and `"a\u0041b"`
