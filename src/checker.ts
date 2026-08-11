@@ -1138,8 +1138,10 @@ function keyPresence(key: Expr, ot: Ty): boolean {
       `${where} on the optional field '${k}'`,
       "a key set is decided at compile time here (from the TYPE), but node decides it per value at runtime — `{}` and " +
       `\`{${k}: …}\` share this type and have different key sets, so there is no answer to give. ` +
-      `Read the field instead (\`o.${k} !== undefined\`), or make it REQUIRED and assign \`undefined\` when it is missing. ` +
-      `Note that \`${k}: T | undefined\` is encoded exactly like \`${k}?: T\` here, so it is refused too even though its key is always present in node`,
+      `Read the field instead (\`o.${k} !== undefined\`); drop the \`?\` so the key is always there; ` +
+      `or use a \`Map\` and \`m.has(k)\`, whose key set really is decided at runtime. ` +
+      `NOT \`${k}: T | undefined\` — that is encoded exactly like \`${k}?: T\` here and lands on this same refusal, ` +
+      `even though its key is always present in node`,
     );
   }
   return found || OBJECT_PROTO_KEYS.includes(k);
@@ -1166,8 +1168,15 @@ function enumerableOrThrow(ot: Ty, what: string, forIn = false): void {
     `${what} of an object with the optional field '${key}'`,
     "a key set is decided at compile time here (from the TYPE), but node decides it per value at runtime — `{}` and " +
     `\`{${key}: …}\` share this type and have different key sets, so there is no answer to give. ` +
-    `Read the field instead (\`o.${key} !== undefined\`), or make it REQUIRED and assign \`undefined\` when it is missing. ` +
-    `Note that \`${key}: T | undefined\` is encoded exactly like \`${key}?: T\` here, so it is refused too even though its key is always present in node`,
+    // THE ADVICE IS COMPILED, in test/key-presence.test.ts. It used to read "or make it
+    // REQUIRED and assign `undefined` when it is missing", which is `k: T | undefined` —
+    // the one spelling the very next sentence says is refused, and following it reproduces
+    // this diagnostic VERBATIM. A hint whose own text retracts it still costs the reader
+    // the round trip; both replacements below compile and are node-exact.
+    `Read the field instead (\`o.${key} !== undefined\`); drop the \`?\` so the key is always there; ` +
+    `or use a \`Map\` and \`m.keys()\`/\`m.has(k)\`, whose key set really is decided at runtime. ` +
+    `NOT \`${key}: T | undefined\` — that is encoded exactly like \`${key}?: T\` here and lands on this same refusal, ` +
+    `even though its key is always present in node`,
   );
 }
 
