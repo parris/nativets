@@ -1053,7 +1053,12 @@ function asWritten(annot: Ty, head: string | undefined): string {
  * literal, which is the shape TypeScript accepts and this compiler cannot.
  */
 function dictHint(annot: Ty, head: string | undefined, got: Ty): string | undefined {
-  if (head !== "Record" || !isMapTy(annot) || !isObjectTy(got)) return undefined;
+  // `head === undefined || head !== "Record"`, not the bare `head !== "Record"`: `head` is
+  // a tagged box and `"Record"` is a raw string, so comparing them is NT2001 — this body's
+  // first blocker when the compiler compiles itself, and the exact rewrite the compiler's
+  // own `mixedNullableHint` prescribes for the negated form. An absent `head` took the
+  // early return before and still does.
+  if (head === undefined || head !== "Record" || !isMapTy(annot) || !isObjectTy(got)) return undefined;
   const k = mapKeyTy(annot), v = mapValTy(annot);
   const fs = objectFields(got);
   const sample = fs.length > 0 ? fs[0]!.key : "k";
@@ -2223,10 +2228,19 @@ class Checker {
     const sigParams = tmpl.params.slice(recvOffset);
     const what = recvOffset ? "generic method" : "generic function";
 
-    if (e.typeArgs?.length) {
+    // `?? []` up front, not `e.typeArgs?.length` and three more reads through the `?.`:
+    // the optional-chain test does not narrow the FIELD for the reads under it, so those
+    // were `'e.typeArgs' is possibly undefined` (NT2001) — this body's first blocker when
+    // the compiler compiles itself. An absent list and an empty one take the same path.
+    //
+    // An indexed `for`, not `.forEach((t, i) => …)`: the callback ASSIGNS the captured
+    // `bindings`, which is a write to an enclosing binding (NT1031), and the loop says the
+    // same thing with the accumulator plainly in this frame.
+    const explicit = e.typeArgs ?? [];
+    if (explicit.length > 0) {
       // Explicit call-site type args pin the instantiation positionally.
-      if (e.typeArgs.length > tps.length) throw typeError(`'${name}' takes ${tps.length} type argument(s), got ${e.typeArgs.length}`);
-      e.typeArgs.forEach((t, i) => { bindings = bindings.set(tps[i]!, t); });
+      if (explicit.length > tps.length) throw typeError(`'${name}' takes ${tps.length} type argument(s), got ${explicit.length}`);
+      for (let i = 0; i < explicit.length; i++) bindings = bindings.set(tps[i]!, explicit[i]!);
     }
     const patterns = sigParams.map((p) => p.annot ?? "number");
     // Round 1 — plain arguments. An ARROW argument is deferred: it needs the (possibly
@@ -2238,8 +2252,14 @@ class Checker {
       // nativets. Reached today by `function f<T>(): number {…}; f<number>(1)`, which
       // must come back NT2001 "expects 0..0 args, got 1" — a self-hosted compiler would
       // abort here instead of producing that diagnostic.
-      const pat = i < patterns.length ? patterns[i] : patterns.at(-1);
-      if (!pat || !hasTypeParam(pat) || a.kind === "ArrowFunction") return;
+      // Clamp the INDEX, then read once. `i < n ? patterns[i] : patterns.at(-1)` gave the
+      // two arms different types (`string` vs `string | undefined`, NT2001) — an in-bounds
+      // read and an `.at` that may miss — and hid the -1 case inside `!pat`, where it
+      // reads as an ordinary absent-value check rather than as the guard it is.
+      const idx = i < patterns.length ? i : patterns.length - 1;
+      if (idx < 0) return; // a ZERO-parameter template: no pattern to clamp to
+      const pat = patterns[idx]!;
+      if (!hasTypeParam(pat) || a.kind === "ArrowFunction") return;
       bindings = unifyTypeParams(sigParams[i]?.rest ? elemTy(pat) : pat, this.type(a, scope), bindings);
     });
     // Round 2 — arrow arguments, now that the other parameters have bound what they can:
@@ -2249,7 +2269,9 @@ class Checker {
       const pat = patterns[i];
       if (a.kind !== "ArrowFunction" || !pat || !hasTypeParam(pat)) return;
       const ctx = substTypeParams(pat, bindings);
-      if (!isFuncTy(ctx) || funcParams(ctx).some(hasTypeParam)) return; // params still unknown → reported below
+      // `(q) => hasTypeParam(q)`, not the point-free `.some(hasTypeParam)`: passing a
+      // function by NAME is a function VALUE, which `.some` does not inline (NT1003).
+      if (!isFuncTy(ctx) || funcParams(ctx).some((q) => hasTypeParam(q))) return; // params still unknown → reported below
       bindings = unifyTypeParams(pat, this.typeArrow(a, ctx, scope), bindings);
     });
 
@@ -2277,13 +2299,21 @@ class Checker {
     const spec = specializeDecl(tmpl, mangled, bindings);
     const params: Ty[] = spec.params.map((p) => p.annot ?? (p.default ? this.type(p.default, this.genericBase!()) : "number"));
     spec.params.forEach((p, i) => { if (p.default && p.annot) this.type(p.default, this.genericBase!(), params[i]); });
-    const fixed = spec.params.length - (spec.params.at(-1)?.rest ? 1 : 0);
+    // The LAST parameter's `rest` flag, computed by a walk. `.at(-1)` is refused on an
+    // array of RECORDS (NT1001: the element would alias its owner), and
+    // `params[params.length - 1]` is the class test/no-index-last.test.ts exists for — it
+    // forms index -1 on an empty list, which is `undefined` to node and a PANIC here. The
+    // loop leaves the last iteration's value, and `false` when there are no parameters,
+    // which is what both `.at(-1)?.rest` spellings below meant.
+    let restLast = false;
+    for (const p of spec.params) restLast = p.rest ?? false;
+    const fixed = spec.params.length - (restLast ? 1 : 0);
     const provisional: Sig = {
       params,
       ret: spec.returnAnnot ?? "number",
       required: spec.params.slice(0, fixed).filter((p) => !p.default).length,
       defaults: spec.params.map((p) => p.default ?? null),
-      rest: !!spec.params.at(-1)?.rest,
+      rest: restLast,
     };
     // REGISTERED BEFORE the return type is inferred, and that order is load-bearing:
     // inferring an unannotated specialization's return type checks its body, which can
@@ -2695,7 +2725,10 @@ class Checker {
     let len = literalLength(e.object);
     if (len === undefined && e.object.kind === "Identifier") {
       const b = scope.lookup(e.object.name);
-      if (b?.constant) len = b.len;
+      // `b !== undefined && b.constant`, not `b?.constant`: the optional chain tests the
+      // field but does not NARROW `b`, so the `b.len` read under it was `'b' is possibly
+      // undefined` (NT2001) — this body's first blocker when the compiler compiles itself.
+      if (b !== undefined && b.constant) len = b.len;
     }
     if (len === undefined) return;
     if (idx >= 0 && idx < len && Number.isInteger(idx)) return;
