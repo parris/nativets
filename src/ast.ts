@@ -318,9 +318,10 @@ export function fieldType(t: Ty, key: string): Ty | undefined {
  *   - `"1e2"`   → `"100"` ≠ `"1e2"`                                        → not an index
  *   - `"4294967295"` → round-trips, but IS 2**32-1, explicitly excluded    → not an index
  *   - `"0"`, `"2"`, `"10"`, `"4294967294"`                                 → indices
- * Each of those is pinned in test/fuzz-diff.test.ts and test/objects.test.ts; a key that
- * is NOT an index keeps its insertion position, so a predicate that is too GENEROUS
- * reorders keys node leaves alone — the same silent wrong answer in the other direction.
+ * Each of those is pinned in test/fixtures/stage22-objarr/key-order.ts (differential vs
+ * node) and test/fuzz-diff.test.ts; a key that is NOT an index keeps its insertion
+ * position, so a predicate that is too GENEROUS reorders keys node leaves alone — the same
+ * silent wrong answer in the other direction.
  */
 export function isArrayIndexKey(k: string): boolean {
   if (k.length === 0) return false;

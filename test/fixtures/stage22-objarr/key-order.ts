@@ -33,3 +33,12 @@ console.log(JSON.stringify({ outer: { q: 1, "5": 2, "0": 3 }, "7": 4, a: 5 }));
 // A spread rebuilds the key set, so the RESULT is canonical rather than spread-ordered.
 const s1 = { b: 1, "2": 2 };
 console.log(JSON.stringify({ ...s1, a: 3, "1": 4 }));
+
+// `Object.fromEntries` mints a key set as freely as a literal does, so its result is
+// canonical too — and each value must stay paired with ITS OWN key. Entry order and slot
+// order are different once index keys move to the front, so a value stored by the entry's
+// POSITION lands under the wrong key: keys and the value set both still look right, and
+// the pairing is silently wrong at exit 0.
+const fe = Object.fromEntries([["b", "x"], ["10", "y"], ["2", "z"], ["a", "w"]]);
+console.log(JSON.stringify(Object.keys(fe)));
+console.log(JSON.stringify(fe));

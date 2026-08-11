@@ -32072,6 +32072,9 @@ declare ptr @nt_dyn_str_or_null(ptr)
 @.str.51 = private unnamed_addr constant [5 x i8] c"\\22q\\22:\\00"
 @.str.52 = private unnamed_addr constant [5 x i8] c"\\22a\\22:\\00"
 @.str.53 = private unnamed_addr constant [5 x i8] c"\\22b\\22:\\00"
+@.str.54 = private unnamed_addr constant [2 x i8] c"x\\00"
+@.str.55 = private unnamed_addr constant [2 x i8] c"b\\00"
+@.str.56 = private unnamed_addr constant [2 x i8] c"a\\00"
 
 define i32 @main(i32 %argc, ptr %argv) {
 entry:
@@ -32082,6 +32085,7 @@ entry:
   %acc.addr = alloca ptr
   %k.addr = alloca ptr
   %s1.addr = alloca ptr
+  %fe.addr = alloca ptr
   %s1 = alloca ptr
   %s2 = alloca double
   %s10 = alloca ptr
@@ -32091,6 +32095,8 @@ entry:
   %s28 = alloca double
   %s33 = alloca ptr
   %s34 = alloca double
+  %s42 = alloca ptr
+  %s43 = alloca double
   br label %L0
 L0:
   call void @nt_init_args(i32 %argc, ptr %argv)
@@ -32755,18 +32761,121 @@ jse38:
   %t473 = call ptr @js_str_concat(ptr %t472, ptr @.str.20)
   call void @js_print_str(ptr %t473)
   call void @js_print_newline()
-  %t474 = load ptr, ptr %p.addr
-  call void @nt_obj_free(ptr %t474)
-  %t475 = load ptr, ptr %n.addr
-  call void @nt_obj_free(ptr %t475)
-  %t476 = load ptr, ptr %b.addr
-  call void @nt_obj_free(ptr %t476)
-  %t477 = load ptr, ptr %f.addr
-  call void @nt_obj_free(ptr %t477)
-  %t478 = load ptr, ptr %s1.addr
-  call void @nt_obj_free(ptr %t478)
-  %t479 = load ptr, ptr %acc.addr
-  call void @nt_str_release(ptr %t479)
+  %t474 = call ptr @nt_obj_new(double 0x4010000000000000)
+  %t475 = getelementptr i64, ptr %t474, i64 2
+  %rc476 = call ptr @nt_str_retain(ptr @.str.54)
+  %t477 = ptrtoint ptr @.str.54 to i64
+  store i64 %t477, ptr %t475
+  %t478 = getelementptr i64, ptr %t474, i64 1
+  %rc479 = call ptr @nt_str_retain(ptr @.str.7)
+  %t480 = ptrtoint ptr @.str.7 to i64
+  store i64 %t480, ptr %t478
+  %t481 = getelementptr i64, ptr %t474, i64 0
+  %rc482 = call ptr @nt_str_retain(ptr @.str.6)
+  %t483 = ptrtoint ptr @.str.6 to i64
+  store i64 %t483, ptr %t481
+  %t484 = getelementptr i64, ptr %t474, i64 3
+  %rc485 = call ptr @nt_str_retain(ptr @.str.43)
+  %t486 = ptrtoint ptr @.str.43 to i64
+  store i64 %t486, ptr %t484
+  store ptr %t474, ptr %fe.addr
+  %t487 = load ptr, ptr %fe.addr
+  %t488 = call ptr @nt_arr_new(double 0x4010000000000000)
+  %rc489 = call ptr @nt_str_retain(ptr @.str.2)
+  %t490 = ptrtoint ptr @.str.2 to i64
+  call double @nt_arr_push(ptr %t488, i64 %t490)
+  %rc491 = call ptr @nt_str_retain(ptr @.str.3)
+  %t492 = ptrtoint ptr @.str.3 to i64
+  call double @nt_arr_push(ptr %t488, i64 %t492)
+  %rc493 = call ptr @nt_str_retain(ptr @.str.55)
+  %t494 = ptrtoint ptr @.str.55 to i64
+  call double @nt_arr_push(ptr %t488, i64 %t494)
+  %rc495 = call ptr @nt_str_retain(ptr @.str.56)
+  %t496 = ptrtoint ptr @.str.56 to i64
+  call double @nt_arr_push(ptr %t488, i64 %t496)
+  store ptr @.str.8, ptr %s42
+  store double 0x0000000000000000, ptr %s43
+  %t497 = call double @nt_arr_len(ptr %t488)
+  br label %js44
+js44:
+  %t498 = load double, ptr %s43
+  %t499 = fcmp olt double %t498, %t497
+  br i1 %t499, label %jsb45, label %jse47
+jsb45:
+  %t500 = load double, ptr %s43
+  %t501 = fcmp oeq double %t500, 0.0
+  br i1 %t501, label %jsf49, label %jsc48
+jsf49:
+  br label %jsa50
+jsc48:
+  %t502 = load ptr, ptr %s42
+  %t503 = call ptr @js_str_concat(ptr %t502, ptr @.str.9)
+  store ptr %t503, ptr %s42
+  br label %jsa50
+jsa50:
+  %t504 = load double, ptr %s43
+  %t505 = call i64 @nt_arr_get(ptr %t488, double %t504)
+  %t506 = inttoptr i64 %t505 to ptr
+  %t507 = call ptr @js_json_quote(ptr %t506)
+  %t508 = load ptr, ptr %s42
+  %t509 = call ptr @js_str_concat(ptr %t508, ptr %t507)
+  store ptr %t509, ptr %s42
+  br label %jsu46
+jsu46:
+  %t510 = load double, ptr %s43
+  %t511 = fadd double %t510, 1.0
+  store double %t511, ptr %s43
+  br label %js44
+jse47:
+  %t512 = load ptr, ptr %s42
+  %t513 = call ptr @js_str_concat(ptr %t512, ptr @.str.10)
+  call void @js_print_str(ptr %t513)
+  call void @js_print_newline()
+  %t514 = load ptr, ptr %fe.addr
+  %t515 = call ptr @js_str_concat(ptr @.str.11, ptr @.str.14)
+  %t516 = getelementptr i64, ptr %t514, i64 0
+  %t517 = load i64, ptr %t516
+  %t518 = inttoptr i64 %t517 to ptr
+  %t519 = call ptr @js_json_quote(ptr %t518)
+  %t520 = call ptr @js_str_concat(ptr %t515, ptr %t519)
+  %t521 = call ptr @js_str_concat(ptr %t520, ptr @.str.9)
+  %t522 = call ptr @js_str_concat(ptr %t521, ptr @.str.15)
+  %t523 = getelementptr i64, ptr %t514, i64 1
+  %t524 = load i64, ptr %t523
+  %t525 = inttoptr i64 %t524 to ptr
+  %t526 = call ptr @js_json_quote(ptr %t525)
+  %t527 = call ptr @js_str_concat(ptr %t522, ptr %t526)
+  %t528 = call ptr @js_str_concat(ptr %t527, ptr @.str.9)
+  %t529 = call ptr @js_str_concat(ptr %t528, ptr @.str.53)
+  %t530 = getelementptr i64, ptr %t514, i64 2
+  %t531 = load i64, ptr %t530
+  %t532 = inttoptr i64 %t531 to ptr
+  %t533 = call ptr @js_json_quote(ptr %t532)
+  %t534 = call ptr @js_str_concat(ptr %t529, ptr %t533)
+  %t535 = call ptr @js_str_concat(ptr %t534, ptr @.str.9)
+  %t536 = call ptr @js_str_concat(ptr %t535, ptr @.str.52)
+  %t537 = getelementptr i64, ptr %t514, i64 3
+  %t538 = load i64, ptr %t537
+  %t539 = inttoptr i64 %t538 to ptr
+  %t540 = call ptr @js_json_quote(ptr %t539)
+  %t541 = call ptr @js_str_concat(ptr %t536, ptr %t540)
+  %t542 = call ptr @js_str_concat(ptr %t541, ptr @.str.20)
+  call void @js_print_str(ptr %t542)
+  call void @js_print_newline()
+  %t543 = load ptr, ptr %p.addr
+  call void @nt_obj_free(ptr %t543)
+  %t544 = load ptr, ptr %n.addr
+  call void @nt_obj_free(ptr %t544)
+  %t545 = load ptr, ptr %b.addr
+  call void @nt_obj_free(ptr %t545)
+  %t546 = load ptr, ptr %f.addr
+  call void @nt_obj_free(ptr %t546)
+  %t547 = load ptr, ptr %s1.addr
+  call void @nt_obj_free(ptr %t547)
+  %t548 = load ptr, ptr %fe.addr
+  call void @nt_obj_free(ptr %t548)
+  %t549 = load ptr, ptr %acc.addr
+  call void @nt_str_release(ptr %t549)
   ret i32 0
 }
 "
