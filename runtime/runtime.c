@@ -1521,8 +1521,34 @@ typedef struct { const char *p; } JP;
  * structured-control-flow model (no unwinder). */
 static int32_t g_exc_set = 0;
 static const char *g_exc_msg = NULL;
+/* THE OBJECT PAYLOAD, OWNED BY THE SLOT. A user `throw` of a record crossing a frame puts
+ * the object BLOCK POINTER here and transfers its single owner to the slot (see
+ * `nt_exc_raise_obj`); a `catch` takes it back out with `nt_exc_take_object`, which NULLs
+ * this, so exactly one of the slot and the binding ever owns it. NULL for every raise the
+ * runtime itself makes: `JSON.parse`, `fs` and `fetch` have a message and no typed object
+ * to build, which is why the `const char *` fast path below stays exactly as it was. */
+static void *g_exc_obj = NULL;
 
-static void nt_exc_raise(const char *msg) { g_exc_set = 1; g_exc_msg = (const char *)nt_str_retain((void *)msg); }
+/* Clear WITHOUT freeing the object — the shared tail of `nt_exc_clear` and of a
+ * raise-while-pending. Returns what the object slot held, so each caller decides its fate. */
+static void *nt_exc_reset(void) {
+  void *o = g_exc_obj;
+  const char *m = g_exc_msg;
+  g_exc_set = 0;
+  g_exc_msg = NULL;
+  g_exc_obj = NULL;
+  nt_str_release((void *)m);
+  return o;
+}
+/* A RAISE WHILE ONE IS PENDING DROPS THE OLD ONE. Reachable today: a `catch { }` with no
+ * binding clears, but a raise from inside a `finally`, or one arriving before an earlier
+ * pending flag was consumed, finds the slot already set. That silently leaked one retained
+ * message per occurrence; with an object payload it would leak the object as well. */
+static void nt_exc_raise(const char *msg) {
+  if (g_exc_set) nt_obj_free(nt_exc_reset());
+  g_exc_set = 1;
+  g_exc_msg = (const char *)nt_str_retain((void *)msg);
+}
 int32_t nt_exc_pending(void) { return g_exc_set; }
 const char *nt_exc_message(void) { return g_exc_msg ? g_exc_msg : ""; }
 /* THE PENDING MESSAGE IS AN OWNER. A raise from a user `throw` that crosses a frame
@@ -1531,17 +1557,40 @@ const char *nt_exc_message(void) { return g_exc_msg ? g_exc_msg : ""; }
  * The catch binding takes its own reference (`emitExcCheck`), which is what makes the
  * handler's own scope-exit release balance. A literal, and every static message the
  * runtime itself raises, is untracked: `nt_str_retain`/`nt_str_release` are no-ops for
- * any pointer not in the refcount table, so no existing path changes at all. */
-void nt_exc_clear(void) {
-  const char *m = g_exc_msg;
-  g_exc_set = 0;
-  g_exc_msg = NULL;
-  nt_str_release((void *)m);
-}
+ * any pointer not in the refcount table, so no existing path changes at all.
+ *
+ * THE OBJECT IS FREED HERE ONLY IF NOBODY TOOK IT. `emitExcCheck` emits
+ * `nt_exc_take_object` before this call whenever the handler has a binding, so this frees
+ * exactly the `catch { }`-with-no-binding case — the one place an owner would otherwise be
+ * dropped on the floor. `nt_obj_free(NULL)` is a no-op, so every string-payload path
+ * reaches a function that behaves as it always did. It is SHALLOW (a pre-existing,
+ * universal property of the object model): heap strings in the object's slots are not
+ * released by it, exactly as for an object freed at scope exit. */
+void nt_exc_clear(void) { nt_obj_free(nt_exc_reset()); }
 /* Public entry point so the CONDITIONALLY-LINKED runtime pieces (nt_http.c's `fetch`)
  * can raise a catchable throw too — a network/DNS failure must reject like node's
  * fetch does, not abort. The flag/message live here, so they need a real symbol. */
 void nt_exc_raise_msg(const char *msg) { nt_exc_raise(msg); }
+/* THE MOVE. `obj` is the object block and this call TAKES it: the raising frame has
+ * already subtracted it from its own drop set (ownership.ts, `ThrowStmt`), so the slot is
+ * now its only owner. `msg` is a BORROWED view of the object's `message` field, or NULL,
+ * kept only so an UNCAUGHT raise can name itself on stderr; it is retained and released on
+ * the message path exactly like any other message, independently of the object, so reading
+ * it never walks the object and the two lifetimes never interact. */
+void nt_exc_raise_obj(void *obj, const char *msg) {
+  nt_exc_raise(msg);
+  g_exc_obj = obj;
+}
+/* Hand the object to the catch binding AND NULL THE SLOT — the transfer that makes the
+ * binding the single owner and stops the `nt_exc_clear` that follows from freeing
+ * underneath it. NULL when the pending raise carries no object (every runtime-raised
+ * message), which is not a case codegen ever asks about: it emits this only at a call site
+ * whose callee was PROVED to raise the handler's own object type (`scanEscaping` rule 3). */
+void *nt_exc_take_object(void) {
+  void *o = g_exc_obj;
+  g_exc_obj = NULL;
+  return o;
+}
 void nt_exc_abort(void) {
   fprintf(stderr, "nativets: uncaught %s\n", g_exc_msg ? g_exc_msg : "exception");
   exit(1);

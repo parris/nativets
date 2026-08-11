@@ -799,19 +799,29 @@ class Analyzer {
         return;
       case "BlockStmt": this.scoped(s.body, state); return;
       case "MultiStmt": this.seq(s.stmts, state); return; // scope-less group: its decls belong to the enclosing block
-      case "ThrowStmt":
+      case "ThrowStmt": {
         this.expr(s.argument, state, false);
         // The EXCEPTIONAL exit's drop set, and it is the same one `ReturnStmt` takes
         // above for the same reason: a throw that propagates out of its frame leaves by
         // a `ret`, so it must free exactly what a `return` written here would free.
         // Computed unconditionally — whether the throw actually propagates is codegen's
         // question (`scanEscaping`), and a throw that branches to a local catch simply
-        // never reads this list. `false` for the consuming flag above, so the thrown
-        // value is not moved out: `throw e` where `e` is a linear local still frees `e`,
-        // and `nt_obj_free` is shallow, so the message string it points at survives the
-        // free and reaches `nt_exc_message` intact.
-        s.drops = this.ownedInScope(state);
+        // never reads this list.
+        //
+        // …EXCEPT THE THROWN VALUE ITSELF, WHICH IS MOVED. This used to free it, on the
+        // rationale that `nt_obj_free` is shallow so the message string inside survived to
+        // reach `nt_exc_message`. THE PAYLOAD IS NOW THE OBJECT (`nt_exc_raise_obj`), not a
+        // string copied out of it, so that rationale is inverted: the raise TAKES the
+        // pointer, the slot is its one owner until a `catch` takes it back
+        // (`nt_exc_take_object`), and freeing it here would hand the handler a dangling
+        // block. Subtracting the name is the MOVE, and it is done by subtraction rather
+        // than by passing `true` to `expr` above deliberately: marking it moved would make
+        // `if (c) throw e;` leave `e` maybe-moved for the code after the `if`, which is a
+        // NT1601 on a program node accepts. Nothing else observes this list.
+        const moved = s.argument.kind === "Identifier" ? s.argument.name : "";
+        s.drops = this.ownedInScope(state).filter((n) => n !== moved);
         return;
+      }
       case "TryStmt": {
         this.scoped(s.block, state);
         // THE CATCH BINDING IS AN OWNER. `throw new Error(m)` stores a temporary with no
