@@ -5387,34 +5387,31 @@ capability was absent while its safety mechanism sat in a `static` helper a few 
 (`NtColl` was already a cell; `arr_thaw` was already the sharing fix). Before pricing a
 runtime feature as missing, read the file, not the header.
 
-### 3. `@@mutable` on fields — the 23x "objects are immutable" bucket (STILL OPEN)
+### 3. `@@mutable` on fields — the store LANDED, the application is still blocked
 
-Every site is an AST field STAMP: `e.ty = v`, `arrow.isAsync = v`, `operand.awaited = v`,
-`d.mutable = v`, `p.paramProp = v`. Three of them were added by this session's own work
-(`awaited`, `isAsync`, `promiseParams`), which is worth knowing — the bucket grows when the
-compiler gains a stamp, so it is not a fixed 23.
+**The store is implemented (`7eaef61`).** A field EVERY member of a `@@mutable` union shares
+now stores in place, gated on `unionCommonField` (same index, same widened type in every
+member). Verified against node through a function boundary and across both members, ASan
+clean; a field at a different slot, absent from a member, or on an undecorated union stays
+refused. So the old note here — "`@@mutable` on the AST interfaces is DEAD, a tagged member
+makes its union NT1009" — is out of date twice over: a tagged member is fine in a union
+today, and the store exists.
 
-**The recorded "net negative" verdict is about the TYPE-level opt-in and remains true:**
-`//@@mutable` on an AST interface is dead, because the tag is NOMINAL and a tagged member
-makes its union `NT1009`. `Expr` and `Stmt` are exactly such unions.
+**But APPLYING it to `src/ast.ts` regresses the frontier, measured — 4 of 12 modules at IR
+down to 3.** Marking `Identifier`, `CallExpr`, `ArrowFunction` and `MemberExpr` makes those
+members NOMINAL, and a read through the union then fails:
 
-**But the two features above did NOT use the type-level opt-in — they used a BINDING-level
-one**, and that route has not been measured. `//@@mutable` on the parameter/local, with the
-write compiled as an ordinary slot store. Today it is `NT1023` ("not an array, Map or Set"),
-which is a guard, not a finding.
+    NT2001  Property 'property' does not exist on {kind:string,value:number,ty:?Ustring} | …
 
-**What the route needs, and the one real obstacle.** A field write through a UNION receiver
-has to know the slot, and `objectFields` of a `U<…>` is empty — that is the same hole that
-produced the `getelementptr … i64 -1` fixed in `3ea9056`. The answer is already in the
-tree: **`unionCommonField`** (ast.ts) resolves a field common to every member at a shared
-slot, which is exactly the well-definedness test a stamp needs. `e.ty = v` is legal iff
-`ty` sits at the same index in every member — and `ty` is precisely the kind of field that
-does.
+A nominal member no longer unifies structurally with the others, so `e.property` on an
+un-narrowed `Expr` — which `unionCommonField` used to answer — stops resolving. The 23
+blockers are therefore NOT closed by marking the interfaces; the tag's nominality is the
+obstacle, exactly as the original note said, just for a different reason than it gave.
 
-So the shape is: extend the `@@mutable` guard to objects, add a `FieldAssign` path for a
-non-`this` receiver, and resolve a union receiver's slot through `unionCommonField`.
-Unmeasured — and given §1 and §2 were both wrong about needing new machinery, worth
-measuring before pricing.
+**What would close them** is a way to permit an in-place field store WITHOUT making the
+member nominal — the attribute on the BINDING rather than the type, which is how the two
+features above work (`//@@mutable` on the parameter/local). That is `NT1023` today ("not an
+array, Map or Set") and is the remaining, unmeasured piece.
 
 ### What that leaves
 
