@@ -7262,7 +7262,11 @@ class Checker {
       // Precedence is TypeScript's: an ANNOTATION wins, then the CONTEXTUAL type this
       // arrow is being assigned/passed into, and only then the DEFAULT (`(n = 1)`).
       const t = p.annot ?? expParams?.[i] ?? this.defaultParamTy(p, scope);
-      if (!t) throw typeError(`cannot infer type of arrow parameter '${p.name}'`, undefined,
+      // `arrow.loc`, not `undefined`. This refusal shipped with NO LOCATION and no span, so
+      // a reader (and a self-hosting lane) could only grep for the parameter NAME across the
+      // file — measured: two wrong guesses in a row while `n` appeared at three sites. An
+      // unlocated diagnostic is the class this project treats as a defect in its own right.
+      if (!t) throw typeError(`cannot infer type of arrow parameter '${p.name}'`, arrow.loc,
         `annotate it (\`(${p.name}: number) => …\`), or give it a default whose type is obvious (\`(${p.name} = 0) => …\`)`);
       return t;
     });

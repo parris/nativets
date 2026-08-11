@@ -1466,6 +1466,10 @@ export interface ArrowFunction {
    *  stamp, for the same reason as `isAsync`: it replaced a `Map<Expr, …>`, and an
    *  identity-KEYED map over the union is `NT1014` just as the set was. */
   promiseParams?: number[];
+  /** Where the arrow starts. Added so `cannot infer type of arrow parameter` can SAY
+   *  where it is: it shipped with no location and no span, and locating it by grepping
+   *  the parameter name is what a reader was left with (two wrong guesses, measured). */
+  loc?: Loc;
   /** The name this arrow is bound to, when it is the initializer of a fully-annotated
    *  `const` and may therefore call ITSELF — `const walk = (s: Stmt): void => { … walk(…) … }`.
    *  Set by the checker's `VarDecl` arm (which types an initializer BEFORE it declares the

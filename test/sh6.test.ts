@@ -1404,11 +1404,14 @@ describe("SH6: differential self-compilation (bun-run compiler is the oracle)", 
       // discriminated union. Still rung 0: the one-frame restriction is untouched, so
       // `…already covered` is still 16 of 1208 and transitive propagation is next. Its
       // ceiling is now 84 instead of 7.
-      // ...and stage-1 stops on `Set<string>[]` now: the three IDENTITY-KEYED collections
-      // over the `Expr` union that held this line are one-way node stamps, so "Set of
-      // U<…>" is gone. An ARRAY OF Set is the next term, and it is a different shape —
-      // the element is a collection, not the union.
-      expect(m.error).toContain("cannot infer type of arrow parameter");
+      // ...and stage-1 stops on `Cannot assign number to string` now. TEN blockers came
+      // off src/parser.ts in one sitting to get here: `Set<string>[]` (both scope stacks
+      // are `string[][]`), `deferred.push`, a nullable Map value, a stale `as` assertion,
+      // an unannotated callback parameter — which took giving `cannot infer type of arrow
+      // parameter` a LOCATION to find, since it named `n` at three sites and pointed at
+      // none — seven conditional `program.<field> = …` writes rebuilt as one construction,
+      // and a method call on a nullable FIELD receiver.
+      expect(m.error).toContain("Cannot assign number to string");
       expect(m.code).toBe("NT2001");
       return;
     }

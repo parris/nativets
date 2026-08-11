@@ -1,11 +1,11 @@
 {
   "recordedAt": {
     "date": "2026-08-11",
-    "rev": "08aed36"
+    "rev": "bddc7a0"
   },
   "modules": {
     "ast.ts": {
-      "sha256": "95068fd381be2812",
+      "sha256": "c1e53bf5887c7352",
       "standalone": {
         "stage": "clear",
         "code": "",
@@ -18,7 +18,7 @@
       }
     },
     "checker.ts": {
-      "sha256": "3c69a4fdb2d15117",
+      "sha256": "8231161f2b59eaac",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -41,7 +41,7 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] cannot infer type of arrow parameter 'n'"
+        "message": "[NT2001] Cannot assign number to string 'base'"
       }
     },
     "codegen.ts": {
@@ -81,7 +81,7 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] cannot infer type of arrow parameter 'n'"
+        "message": "[NT2001] Cannot assign number to string 'base'"
       }
     },
     "diagnostics.ts": {
@@ -108,7 +108,7 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] cannot infer type of arrow parameter 'n'"
+        "message": "[NT2001] Cannot assign number to string 'base'"
       }
     },
     "lexer.ts": {
@@ -134,7 +134,7 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] cannot infer type of arrow parameter 'n'"
+        "message": "[NT2001] Cannot assign number to string 'base'"
       }
     },
     "ownership.ts": {
@@ -152,7 +152,7 @@
       }
     },
     "parser.ts": {
-      "sha256": "efc37782b4ca3603",
+      "sha256": "eb651d17821be3cd",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -161,7 +161,7 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] cannot infer type of arrow parameter 'n'"
+        "message": "[NT2001] Cannot assign number to string 'base'"
       }
     }
   }

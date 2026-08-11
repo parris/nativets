@@ -19,7 +19,7 @@ import {
 } from "./ast.ts";
 import type {
   Program, Stmt, Expr, Param, VarDecl, Declarator, Ty, BinaryOp, SwitchCase, ObjectProperty, FuncDecl,
-  ImportDecl, TextImport, ExportTable, RecTypeEntry, AssignOp,
+  ImportDecl, TextImport, ExportTable, RecTypeEntry, AssignOp, Loc,
 } from "./ast.ts";
 
 /** Options for parsing ONE module of a program (see src/modules.ts). */
@@ -879,7 +879,7 @@ class Parser {
         const sample = [...deferred]
           .sort((a, b) => (why.get(a) ?? "").length - (why.get(b) ?? "").length)
           .slice(0, 2)
-          .map((n) => `'${n}': ${clip(why.get(n) ?? "no shape was produced", 160)}`);
+          .map((n: string) => `'${n}': ${clip(why.get(n) ?? "no shape was produced", 160)}`);
         this.cycleStall = sample.join("; ") + (deferred.length > sample.length ? ` (and ${deferred.length - sample.length} more that select over them)` : "");
         this.cycleStallSize = { total: names.length, left: deferred.length };
         // SINGLE-OWNER now, by the two routes the note that used to sit here named. Neither
@@ -1359,37 +1359,54 @@ class Parser {
         const cls = f.slice(0, f.indexOf("."));
         if (bound.has(cls)) throw nyi(NYI.CLASS_FEATURE, `a binding shadows class '${cls}', which has static fields (\`${f}\`); rename it`);
       }
-      body = resolveStaticFieldReads(body, this.staticFieldNames, (n, at) => {
+      // ANNOTATED. The contextual type from `resolveStaticFieldReads`'s `onAssign?:
+      // (name: string, at: Loc | undefined) => never` does not reach an arrow parameter
+      // through an OPTIONAL parameter position here, so both are spelled out — this was
+      // the first blocker of five of the twelve modules, and it took giving the diagnostic
+      // a location to find (`ArrowFunction.loc`; it named `n` at three sites and pointed
+      // at none of them).
+      body = resolveStaticFieldReads(body, this.staticFieldNames, (n: string, at: Loc | undefined) => {
         throw mutationError(`assignment to the static field '${n}'`,
           "a static field is module-level storage initialized once where the class is declared — it is a `const`, so give the class a static METHOD that returns the value you want instead; for state that CHANGES (`C.f++`, `C.f += 1`), use a module-level `let`, or a field of a `@@mutable` class instance",
           at);
       });
     }
-    const program: Program = { kind: "Program", body };
-    // `@@mutable` classes (decorators lane). Attached only when the source used the
-    // attribute, so an ordinary program's Program is byte-identical to what it was.
-    if (this.mutableClasses.size) program.mutableClasses = [...this.mutableClasses];
-    if (this.mutableRecords.size) program.mutableRecords = [...this.mutableRecords];
-    // Recursive-type shapes (`@Name` back-edges). Absent unless the source declared one.
-    // A `Map` spread would give `[string, Ty][]`, a TUPLE array — see `Program.recTypes`
-    // for why that is spelled as a record instead.
-    if (this.recTypes.size) {
-      let recs: RecTypeEntry[] = [];
-      for (const [n, shape] of this.recTypes) recs = [...recs, { name: n, ty: shape }];
-      program.recTypes = recs;
+    // BUILT IN ONE CONSTRUCTION, not assembled by seven conditional field writes.
+    // `program.mutableClasses = …` is NT1606 ("objects are immutable") and was the first
+    // blocker of five of the twelve modules; every field here is OPTIONAL, so `undefined`
+    // means exactly what "not attached" meant before and an ordinary program's `Program`
+    // is unchanged. The same move `check` needed for `program.body` in src/checker.ts.
+    //
+    // Recursive-type shapes: a `Map` spread would give `[string, Ty][]`, a TUPLE array —
+    // see `Program.recTypes` for why it is a record instead.
+    //@@mutable
+    const recs: RecTypeEntry[] = [];
+    for (const [n, shape] of this.recTypes) recs.push({ name: n, ty: shape });
+    // Bound to a LOCAL, then written back: a method call on a nullable FIELD receiver is
+    // NT1002 even under a guard, because narrowing needs a stable access path and
+    // `this.<field>` is not one. Same shape as `sub.blockedOn` above.
+    const collect = this.collectTypes;
+    if (collect !== undefined) {
+      let acc = collect;
+      for (const [k, v] of this.typeAliases) acc = acc.set(k, v);
+      this.collectTypes = acc;
     }
-    // Host FFI (SH4) — attached only when the source imported a `node:` builtin.
-    if (this.hostImports.size) program.hostImports = [...this.hostImports];
-    if (this.collectTypes) for (const [k, v] of this.typeAliases) this.collectTypes = this.collectTypes.set(k, v);
-    // Only attach the module surface when the source actually used it, so a
-    // single-file program's Program is byte-identical to what it always was.
-    if (this.imports.length) program.imports = this.imports;
-    if (this.textImports.length) program.textImports = this.textImports;
-    if (this.exportValues.size || this.exportReexports.size || this.exportTypes.size) {
-      let types = new Map<string, Ty>();
-      for (const n of this.exportTypes) { const t = this.typeAliases.get(n); if (t) types = types.set(n, t); }
-      program.exports = { values: this.exportValues, reexports: this.exportReexports, types, asyncValues: this.exportAsync } satisfies ExportTable;
-    }
+    let types = new Map<string, Ty>();
+    for (const n of this.exportTypes) { const t = this.typeAliases.get(n); if (t) types = types.set(n, t); }
+    const hasExports = this.exportValues.size > 0 || this.exportReexports.size > 0 || this.exportTypes.size > 0;
+    const program: Program = {
+      kind: "Program",
+      body,
+      mutableClasses: this.mutableClasses.size ? [...this.mutableClasses] : undefined,
+      mutableRecords: this.mutableRecords.size ? [...this.mutableRecords] : undefined,
+      recTypes: this.recTypes.size ? recs : undefined,
+      hostImports: this.hostImports.size ? [...this.hostImports] : undefined,
+      imports: this.imports.length ? this.imports : undefined,
+      textImports: this.textImports.length ? this.textImports : undefined,
+      exports: hasExports
+        ? { values: this.exportValues, reexports: this.exportReexports, types, asyncValues: this.exportAsync }
+        : undefined,
+    };
     return program;
   }
 
@@ -3395,7 +3412,7 @@ class Parser {
     const arrow: Expr = {
       kind: "ArrowFunction",
       params: fn.params.map((p, i) => ({ name: names[i]!, annot: p.annot })),
-      body: { kind: "CallExpr", callee: this.ident(inner.name), args: names.map((n) => this.ident(n)) },
+      body: { kind: "CallExpr", callee: this.ident(inner.name), args: names.map((n: string) => this.ident(n)) },
       exprBody: true,
     };
     // Bottom-up application: the decorator written CLOSEST to the method wraps first.
@@ -3687,6 +3704,10 @@ class Parser {
   }
 
   private parseArrow(): Expr {
+    // Where the arrow STARTS, stamped onto every shape below. `cannot infer type of arrow
+    // parameter` had no location at all before this (see `ArrowFunction.loc`).
+    const startTok = this.peek(0);
+    const arrowLoc: Loc = { line: startTok.line, col: startTok.col, file: this.file };
     //@@mutable
     const params: Param[] = [];
     //@@mutable
@@ -3736,12 +3757,12 @@ class Parser {
     this.returnsAsyncFnStack.push(retAsyncFn);
     this.asyncParamScopes.push(arrowPromiseNames);
     try {
-      if (this.at("{")) return mk({ kind: "ArrowFunction", params, stmts: [...prelude, ...this.parseBlock()], exprBody: false, retAnnot });
+      if (this.at("{")) return mk({ kind: "ArrowFunction", params, stmts: [...prelude, ...this.parseBlock()], exprBody: false, retAnnot, loc: arrowLoc });
       const body = this.parseAssign();
       // A pattern parameter needs statements to bind its names, so an expression body
       // becomes a block: `([a, b]) => a + b` ≡ `(__d0) => { const a = …, b = …; return a + b; }`.
-      if (prelude.length) return mk({ kind: "ArrowFunction", params, stmts: [...prelude, { kind: "ReturnStmt", argument: body }], exprBody: false, retAnnot });
-      return mk({ kind: "ArrowFunction", params, body, exprBody: true, retAnnot });
+      if (prelude.length) return mk({ kind: "ArrowFunction", params, stmts: [...prelude, { kind: "ReturnStmt", argument: body }], exprBody: false, retAnnot , loc: arrowLoc });
+      return mk({ kind: "ArrowFunction", params, body, exprBody: true, retAnnot, loc: arrowLoc });
     } finally { this.returnsAsyncFnStack.pop(); this.asyncParamScopes.pop(); }
   }
 
