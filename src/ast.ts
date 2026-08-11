@@ -2579,9 +2579,13 @@ export function mentionsThis(e: Expr): boolean {
 
 /* ---- pass 5: which fields does a constructor body store into? -------------- */
 
-/** The accumulator for `fieldsStoredViaThis`, in the shape `BoundNames`/`ThisHit` set. */
+/** The accumulator for `fieldsStoredViaThis`, in the shape `BoundNames`/`ThisHit` set.
+ *
+ * `ctorOnly` restricts the scan to CONSTRUCTOR stores — `inCtor`, which the parser sets
+ * exactly where it sets `inCtorBody`. Both callers walk the same bodies, so the two ask
+ * one visitor rather than keeping a second copy that can drift from it. */
 //@@mutable
-interface StoredFields { names: Set<string> }
+interface StoredFields { names: Set<string>; ctorOnly: boolean }
 
 function storedExpr(e: Expr, out: StoredFields): Expr {
   // TRUTHINESS, not `=== true`: `viaThis` is `?Uboolean`, and comparing a nullable
@@ -2591,7 +2595,13 @@ function storedExpr(e: Expr, out: StoredFields): Expr {
   // `out.names = out.names.add(…)`, not `out.names.add(…)`: `Set` is PERSISTENT here, so
   // the bare call returns a new set and leaves the receiver untouched (NT1606) — the same
   // reason `BoundNames` above is written this way.
-  if (e.kind === "FieldAssign" && e.viaThis) out.names = out.names.add(e.field);
+  // Spelled as nested `if`s rather than `(!out.ctorOnly || e.inCtor)`: `inCtor` is the
+  // same `?Uboolean` as `viaThis`, and mixing one into a `||` with a plain `boolean` is
+  // the compare this subset refuses (NT2001), for the reason stated just above.
+  if (e.kind === "FieldAssign" && e.viaThis) {
+    if (out.ctorOnly) { if (e.inCtor) out.names = out.names.add(e.field); }
+    else out.names = out.names.add(e.field);
+  }
   return walkExprChildren(e, (x: Expr): Expr => storedExpr(x, out), (s: Stmt): Stmt => storedStmt(s, out), KEEP_TY);
 }
 function storedStmt(s: Stmt, out: StoredFields): Stmt {
@@ -2612,7 +2622,31 @@ function storedStmt(s: Stmt, out: StoredFields): Stmt {
  * not a syntactic question the parser can answer.
  */
 export function fieldsStoredViaThis(body: Stmt[]): Set<string> {
-  const out: StoredFields = { names: new Set<string>() };
+  return storedFields(body, false);
+}
+
+/**
+ * The same scan, restricted to stores the parser marked `inCtor`.
+ *
+ * This is the set of fields a CONSTRUCTOR body puts a value in somewhere — the tracked
+ * set for the path-sensitive question `checkDefiniteAssignment` then answers ("…and on
+ * every path out?"). Restricting to `inCtor` is what keeps a METHOD's `this.f = …` from
+ * making the method look like a constructor: only the constructor is obliged to leave
+ * every field written, and a method that assigns a field is the ordinary case.
+ *
+ * Starting from what the constructor stores SOMEWHERE, rather than from the class's full
+ * field list, also keeps this from re-deciding cases it cannot see. A field the
+ * constructor never mentions is the SYNTACTIC case, already decided by the caller of
+ * `fieldsStoredViaThis` above — including its exemptions, of which `class E extends Error`
+ * (whose inherited `message` is set by `super(…)`, not by a `this.f = …`) is the one that
+ * exists today.
+ */
+export function ctorFieldsStored(body: Stmt[]): Set<string> {
+  return storedFields(body, true);
+}
+
+function storedFields(body: Stmt[], ctorOnly: boolean): Set<string> {
+  const out: StoredFields = { names: new Set<string>(), ctorOnly: ctorOnly };
   for (const s of body) storedStmt(s, out);
   return out.names;
 }

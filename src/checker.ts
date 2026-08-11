@@ -8,7 +8,7 @@
  */
 
 import type { Program, Stmt, Expr, Ty, FuncDecl, VarDecl, ForOfStmt, MemberExpr, FieldAssign, Declarator, Param } from "./ast.ts";
-import { mentionsThis } from "./ast.ts";
+import { mentionsThis, ctorFieldsStored } from "./ast.ts";
 import { isArrayTy, elemTy, isObjectTy, objectType, objectFields, fieldType, isFuncTy, funcParams, funcRet, makeFuncTy, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, makeMapTy, makeSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isTextEncoderTy, isTextDecoderTy, isResponseTy, isHeadersTy } from "./ast.ts";
 import { hasTypeParam, substTypeParams, eraseTypeParams, unifyTypeParams, mapTypesDeep, mapTypesDeepStmt, mutableTags, exprText, exprLoc, freshArray, stringLiteralValue, exprTy } from "./ast.ts";
 import { makeArrayTy } from "./ast.ts";
@@ -7745,15 +7745,6 @@ type DAEscapes = { breaks: DAFlow[]; conts: DAFlow[]; rets: DAFlow[] } | null;
 const daLive = (flows: DAFlow[]): { flow: DAFlow; diverged: boolean }[] =>
   flows.map((flow) => ({ flow, diverged: false }));
 
-/**
- * The escape collector for a construct that OWNS `break` (every loop, and `switch`).
- * `conts` is the caller's decision — a loop owns `continue` and passes `[]`, a `switch`
- * does not and passes the enclosing loop's — while `rets` is never a decision: a
- * `return` leaves the function, so it always belongs to the collector further out.
- */
-function daInner(esc: DAEscapes, conts: DAFlow[]): { breaks: DAFlow[]; conts: DAFlow[]; rets: DAFlow[] } {
-  return { breaks: [], conts, rets: esc ? esc.rets : [] };
-}
 
 /** Analyze a statement list. Returns whether control reaches past its end. */
 function daBlock(body: Stmt[], tracked: DATracked | null, flow: DAFlow, esc: DAEscapes): DAExit {
@@ -7840,7 +7831,7 @@ function daStmt(s: Stmt, tracked: DATracked | null, flow: DAFlow, esc: DAEscapes
     // to this loop and must not be charged to the switch around it.
     case "WhileStmt": {
       daUse(s.test, tracked, flow);
-      daBlock(s.body, tracked, new Set(flow), daInner(esc, []));
+      daBlock(s.body, tracked, new Set(flow), { breaks: [], conts: [], rets: esc ? esc.rets : [] });
       return "fall";
     }
 
@@ -7851,7 +7842,7 @@ function daStmt(s: Stmt, tracked: DATracked | null, flow: DAFlow, esc: DAEscapes
       // body's flow alone printed the slot's zero where node prints `undefined`:
       //     do { if (c) break; n = 7; } while (false);
       //     do { continue; } while (false);        // `continue` runs the TEST, then exits
-      const mine = daInner(esc, []);
+      const mine = { breaks: [] as DAFlow[], conts: [] as DAFlow[], rets: esc ? esc.rets : [] };
       const body = new Set(flow);
       const exit = daBlock(s.body, tracked, body, mine);
       const after = daMerge(
@@ -7870,20 +7861,20 @@ function daStmt(s: Stmt, tracked: DATracked | null, flow: DAFlow, esc: DAEscapes
       }
       daUse(s.test, tracked, flow);
       const body = new Set(flow);
-      daBlock(s.body, tracked, body, daInner(esc, [])); // may run zero times
+      daBlock(s.body, tracked, body, { breaks: [], conts: [], rets: esc ? esc.rets : [] }); // may run zero times
       daUse(s.update, tracked, body);
       return "fall";
     }
 
     case "ForOfStmt": {
       daUse(s.iterable, tracked, flow);
-      daBlock(s.body, tracked, new Set(flow), daInner(esc, [])); // may run zero times
+      daBlock(s.body, tracked, new Set(flow), { breaks: [], conts: [], rets: esc ? esc.rets : [] }); // may run zero times
       return "fall";
     }
 
     case "ForInStmt": {
       daUse(s.object, tracked, flow);
-      daBlock(s.body, tracked, new Set(flow), daInner(esc, [])); // may run zero times
+      daBlock(s.body, tracked, new Set(flow), { breaks: [], conts: [], rets: esc ? esc.rets : [] }); // may run zero times
       return "fall";
     }
 
@@ -7897,7 +7888,7 @@ function daStmt(s: Stmt, tracked: DATracked | null, flow: DAFlow, esc: DAEscapes
       // lands at the switch's exit, so it is a LIVE incoming path and must join the
       // intersection. A `continue` is NOT — it jumps to the enclosing loop's head, past
       // this exit — so `conts` is passed through to the loop that owns it.
-      const mine = daInner(esc, esc ? esc.conts : []);
+      const mine = { breaks: [] as DAFlow[], conts: esc ? esc.conts : [], rets: esc ? esc.rets : [] };
       const paths = s.cases.map((c) => {
         const f = new Set(flow);
         if (c.test) daUse(c.test, tracked, f);
@@ -7986,59 +7977,53 @@ function daStmt(s: Stmt, tracked: DATracked | null, flow: DAFlow, esc: DAEscapes
  *  and a local of the same name are never confused — they are different storage. */
 function daField(name: string): string { return `this.${name}`; }
 
-/** Every field this body stores into via `this.f = …` inside a CONSTRUCTOR, at any depth.
- *
- *  Shape-blind, for the reason `daReads` gives: the AST is plain data, and a hand-written
- *  switch over statement kinds goes stale. Over-approximating here is the safe direction
- *  in only one way — it can add a field to the tracked set that the flow walk then cannot
- *  see assigned — so `inCtor` is required, not just `viaThis`: it is the parser's own
- *  answer to "is this a constructor body", set exactly where it sets `inCtorBody`, and a
- *  METHOD's `this.f = …` must not make the method look like a constructor. */
-function daCtorFields(node: unknown, out: Set<string>): void {
-  if (Array.isArray(node)) { for (const x of node) daCtorFields(x, out); return; }
-  if (node === null || typeof node !== "object") return;
-  const n = node as { kind?: string; field?: unknown; viaThis?: boolean; inCtor?: boolean };
-  if (n.kind === "FieldAssign" && n.viaThis && n.inCtor && typeof n.field === "string") out.add(n.field);
-  for (const v of Object.values(node)) daCtorFields(v, out);
+/** The class's instance type, which is the `this` parameter's — or `undefined` for a
+ *  plain function, which has no receiver and so no fields to prove. */
+function daSelfTy(fn: FuncDecl): Ty | undefined {
+  if (fn.params.length === 0) return undefined;
+  if (fn.params[0]!.name !== "this") return undefined;
+  return fn.params[0]!.annot;
 }
 
 /**
- * Seed `tracked` with the constructor fields `body` must prove, and return them.
+ * The constructor fields `fn` must prove, each with the declared type its diagnostic
+ * names. Empty for anything that is not a constructor.
  *
  * A field whose declared type ADMITS `undefined` is left out: it has a legal starting
  * value, and the parser has already given it an unconditional initializer, so it is
  * never at risk. That is the same carve-out `let x: T | undefined;` gets above, said
  * about a slot instead of a binding.
+ *
+ * `tracked = tracked.set(…)`, not `tracked.set(…)`: `Map` is PERSISTENT in the subset
+ * `src/` has to stay inside, so the bare call returns a new map and leaves the receiver
+ * untouched (NT1606) — the rebinding spelling `ast.ts`'s own `out.names = out.names.add`
+ * uses, and the one that says the same thing under node.
  */
-function daSeedCtorFields(fn: { params?: Param[]; body?: Stmt[] }, tracked: DATracked): string[] {
-  const self = fn.params && fn.params.length > 0 && fn.params[0]!.name === "this" ? fn.params[0]!.annot : undefined;
-  const stored = new Set<string>();
-  daCtorFields(fn.body, stored);
-  const proved: string[] = [];
-  for (const f of stored) {
+function daCtorFieldTys(fn: FuncDecl): DATracked {
+  const self = daSelfTy(fn);
+  let tys: DATracked = new Map<string, Ty | "unknown">();
+  for (const f of ctorFieldsStored(fn.body)) {
     const ty = self === undefined ? undefined : fieldType(self, f);
     if (ty !== undefined && isNullableTy(ty) && nullishKind(ty) === "undefined") continue;
-    tracked.set(daField(f), ty ?? "unknown");
-    proved.push(f);
+    tys = tys.set(f, ty ?? "unknown");
   }
-  return proved;
+  return tys;
 }
 
 /** Refuse every field of `fn` that some path out of the constructor leaves unwritten. */
 function daCheckCtorExit(
-  fn: { params?: Param[] }, fields: string[], flow: DAFlow, exit: DAExit, esc: { rets: DAFlow[] },
+  fn: FuncDecl, fields: DATracked, flow: DAFlow, exit: DAExit, rets: DAFlow[],
 ): void {
-  const paths = [{ flow, diverged: exit === "left" }, ...daLive(esc.rets)];
+  const paths = [{ flow, diverged: exit === "left" }, ...daLive(rets)];
   // Every path left by `throw`: no instance ever escapes, so there is nothing to prove.
   // `daMerge`'s own fallback would answer "nothing is assigned" here and refuse the lot.
   if (paths.every((p) => p.diverged)) return;
   const out = daMerge(paths, new Set<string>());
-  const self = fn.params && fn.params.length > 0 ? fn.params[0]!.annot : undefined;
+  const self = daSelfTy(fn);
   const cls = self === undefined ? "this" : classTag(self) ?? "this";
-  for (const f of fields) {
+  for (const f of fields.keys()) {
     if (out.has(daField(f))) continue;
-    const ty = self === undefined ? undefined : fieldType(self, f);
-    const shown = ty ?? "unknown";
+    const shown = fields.get(f) ?? "unknown";
     throw nyi(
       NYI.CLASS_FEATURE,
       `class '${cls}' field '${f}' is not assigned on every path out of its constructor`,
@@ -8088,13 +8073,14 @@ function checkDefiniteAssignment(body: Stmt[]): void {
       // this body is a constructor — its fields. Sharing the walk is what keeps the two
       // diagnostics in source order and stops the constructor question from acquiring a
       // second, weaker control-flow model of its own.
+      const fn = node as FuncDecl;
+      const fields = n.kind === "FuncDecl" ? daCtorFieldTys(fn) : new Map<string, Ty | "unknown">();
       const tracked = new Map<string, Ty | "unknown">();
-      const fn = node as { params?: Param[]; body?: Stmt[] };
-      const fields = n.kind === "FuncDecl" ? daSeedCtorFields(fn, tracked) : [];
+      for (const f of fields.keys()) tracked.set(daField(f), fields.get(f) ?? "unknown");
       const flow = new Set<string>();
       const esc = { breaks: [] as DAFlow[], conts: [] as DAFlow[], rets: [] as DAFlow[] };
       const exit = daBlock(nested as Stmt[], tracked, flow, esc);
-      if (fields.length > 0) daCheckCtorExit(fn, fields, flow, exit, esc);
+      if (fields.size > 0) daCheckCtorExit(fn, fields, flow, exit, esc.rets);
     }
     for (const v of Object.values(node)) walk(v);
   };
