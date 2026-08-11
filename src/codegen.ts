@@ -5968,7 +5968,7 @@ class FnGen {
       case "flat": { const t = this.fresh(); this.emit(`${t} = call ptr @nt_arr_flat1(ptr ${recv.v})`); return { v: t, ty: el }; }
       case "flatMap": return this.genFlatMap(recv, args[0] as Extract<Expr, { kind: "ArrowFunction" }>, this.locArg(loc) ?? "null");
       case "some": case "every": case "find": case "findIndex": case "findLast": case "findLastIndex":
-        return this.genSearchHof(method, recv, args[0] as Extract<Expr, { kind: "ArrowFunction" }>);
+        return this.genSearchHof(method, recv, args[0] as Extract<Expr, { kind: "ArrowFunction" }>, this.locArg(loc) ?? "null");
       case "forEach": return this.genForEach(recv, args[0] as Extract<Expr, { kind: "ArrowFunction" }>, this.locArg(loc) ?? "null");
       case "map": return this.genMap(recv, args[0] as Extract<Expr, { kind: "ArrowFunction" }>, this.locArg(loc) ?? "null");
       case "filter": return this.genFilter(recv, args[0] as Extract<Expr, { kind: "ArrowFunction" }>, this.locArg(loc) ?? "null");
@@ -6421,7 +6421,7 @@ class FnGen {
    *  `findLast`/`findLastIndex` iterate BACKWARDS, also node's order, so a callback
    *  with side effects still observes the same sequence. The hit index lives in a
    *  slot; `.find*` then boxes it as `T | undefined`. */
-  private genSearchHof(method: string, recv: Val, arrow: Extract<Expr, { kind: "ArrowFunction" }>): Val {
+  private genSearchHof(method: string, recv: Val, arrow: Extract<Expr, { kind: "ArrowFunction" }>, locp: string): Val {
     this.freshenHofArrow(arrow);
     const el = elemTy(recv.ty);
     const p = arrow.params[0]!.name;
@@ -6452,7 +6452,14 @@ class FnGen {
     const iB = this.fresh();
     this.emit(`${iB} = load double, ptr ${idx}`);
     const slot = this.fresh();
-    this.emit(`${slot} = call i64 @nt_arr_get(ptr ${src}, double ${iB})`);
+    // Bounds-PANICKING, for the reason `hofElem` is: `len` above is a SNAPSHOT taken
+    // before the first callback ran, so a callback that shrinks the receiver walks past
+    // the end and `nt_arr_get` answered 0 there. It bites harder here than in `.map`,
+    // because the phantom is handed to a PREDICATE rather than copied into an output
+    // array — `[1,2,3,4].some((x, i) => { …pop twice…; return x === 0; })` answered
+    // `true` where node answers `false`, exit 0 both ways. (This loop does not go through
+    // `hofElem`: it counts DOWN for `.findLast`/`.findLastIndex`, so it keeps its own.)
+    this.emit(`${slot} = call i64 @nt_arr_hof_at(ptr ${src}, double ${iB}, ptr ${this.mod.intern(`.${method}`)}, ptr ${locp})`);
     this.emit(`store ${llvmTy(el)} ${this.fromSlot(slot, el)}, ptr %${p}.addr`);
     // The index parameter — this loop's OWN counter, which for `.findLast`/`.findLastIndex`
     // starts at `len - 1` and counts DOWN. node passes the real position either way, so

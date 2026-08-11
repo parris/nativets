@@ -194,15 +194,33 @@ console.log(JSON.stringify(out), a.length);
  *
  *     [1,2,3,4].some((x, i) => { if (i === 0) { a.pop(); a.pop(); } return x === 0; })
  *     node: false      nativets (before): true      both exit 0
+ *
+ * MEASURING node here also split the family in two, which is worth writing down because
+ * the two halves are not interchangeable and the ES spec is the reason:
+ *
+ *   `.some` / `.every`                                  guard each step with HasProperty,
+ *                                                       so they SKIP an absent index —
+ *                                                       visited [0,1] of a 4-snapshot.
+ *   `.find` / `.findIndex` / `.findLast` / `.findLastIndex`
+ *                                                       use a plain Get, so they visit
+ *                                                       EVERY snapshot index and hand the
+ *                                                       callback `undefined` for the ones
+ *                                                       that are gone — visited [0,1,2,3]
+ *                                                       (and [3,2,1,0] backwards).
+ *
+ * Neither half is reproducible: one needs "skip", the other needs `undefined`. So all six
+ * panic, and the trigger index differs only because the `Last` pair counts DOWN — the
+ * shrink has to happen on the FIRST element each direction visits to get past the end.
  */
 describe("the search HOFs have the same snapshot bound", () => {
-  const SEARCHES: [string, string][] = [
-    [".some", `const r = a.some((x, i) => { if (i === 0) { a.pop(); a.pop(); } return x === 0; });`],
-    [".every", `const r = a.every((x, i) => { if (i === 0) { a.pop(); a.pop(); } return x !== 0; });`],
-    [".findIndex", `const r = a.findIndex((x, i) => { if (i === 0) { a.pop(); a.pop(); } return x === 0; });`],
-    [".findLastIndex", `const r = a.findLastIndex((x, i) => { if (i === 0) { a.pop(); a.pop(); } return x === 0; });`],
+  // [method, the index the callback shrinks at, node's answer — all measured]
+  const SEARCHES: [string, string, string][] = [
+    [".some", `const r = a.some((x, i) => { if (i === 0) { a.pop(); a.pop(); } return x === 0; });`, "false 2\n"],
+    [".every", `const r = a.every((x, i) => { if (i === 0) { a.pop(); a.pop(); } return x !== 0; });`, "true 2\n"],
+    [".findIndex", `const r = a.findIndex((x, i) => { if (i === 0) { a.pop(); a.pop(); } return x === 0; });`, "-1 2\n"],
+    [".findLastIndex", `const r = a.findLastIndex((x, i) => { if (i === 3) { a.pop(); a.pop(); } return x === 0; });`, "-1 2\n"],
   ];
-  for (const [method, body] of SEARCHES) {
+  for (const [method, body, expected] of SEARCHES) {
     test(`${method} — the phantom element used to reach the predicate`, async () => {
       const src = `//@@mutable
 const a: number[] = [1, 2, 3, 4];
@@ -210,6 +228,7 @@ ${body}
 console.log(r, a.length);
 `;
       const oracle = runWithNodeAttrs(src);
+      expect(oracle.stdout).toBe(expected);
       expect(oracle.exitCode).toBe(0);
 
       const r = await run(src);
