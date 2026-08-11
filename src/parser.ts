@@ -12,9 +12,10 @@ import { parseError, nyi, NYI, mutationError, decoratorError, nulLiteral, unknow
 import {
   makeNullable, makeMapTy, makeSetTy, makeFuncTy, objectType, typeParamTy, eraseTypeParams, mapTypesDeep, mapTypesDeepExpr,
   isObjectTy, isFuncTy, classTag, makeUnionTy, unionDiscriminant, widenLiteralTys, stringLitTy, isUnionTy,
+  isNullableTy, nullishKind,
   tagValueIsEncodable, objectFields, isStringLitTy, HOST_MODULES, unionMembers,
   makeGeneralUnionTy, isGeneralUnionArm, generalUnionArmTypeof, extractUnionMembers, unionWidenedMembers,
-  resolveStaticFieldReads, collectBindingNames, typeRefTy, expandTypeRef, makeArrayTy, exprLoc,
+  resolveStaticFieldReads, collectBindingNames, fieldsStoredViaThis, typeRefTy, expandTypeRef, makeArrayTy, exprLoc,
 } from "./ast.ts";
 import type {
   Program, Stmt, Expr, Param, VarDecl, Declarator, Ty, BinaryOp, SwitchCase, ObjectProperty, FuncDecl,
@@ -889,6 +890,12 @@ class Parser {
    *  parsed; spliced at the top of that function's body (see parsePatternParam). */
   private paramPrelude: Stmt[] = [];
   private ident(name: string): Expr { return { kind: "Identifier", name }; }
+  /** The implicit `undefined` an optional param/field erases to. A FACTORY rather than an
+   *  inline literal at each site: an object literal assigned INTO an `Expr`-typed slot has
+   *  its `kind` widened to `string` before the union is matched, so it is refused, while
+   *  the same literal RETURNED from an `Expr`-returning function is contextually typed and
+   *  accepted (the `ident` precedent above). One spelling, and the compiler can read it. */
+  private undef(): Expr { return { kind: "UndefinedLiteral" }; }
 
   /**
    * In-scope generic type parameters (M3). Pushed while parsing a generic function's
@@ -2723,7 +2730,7 @@ class Parser {
   private mkParam(name: string, annot: Ty | undefined, def: Expr | undefined, rest: boolean, optional: boolean): Param {
     if (optional) {
       annot = makeNullable("undefined", annot ?? "number");
-      if (!def) def = { kind: "UndefinedLiteral" };
+      if (!def) def = this.undef();
     }
     return { name, annot, default: def, rest };
   }
@@ -3070,7 +3077,18 @@ class Parser {
       // block and every field is a real slot, so "absent" has to be WRITTEN as the
       // `undefined` arm of the nullable box. Without this the slot stays zero and a read
       // dereferences NULL. A constructor that assigns the field simply overwrites this.
-      if (init === undefined && optional) init = { kind: "UndefinedLiteral" };
+      //
+      // The condition is the field's TYPE, not the `?` token that may have produced it.
+      // Gating on `optional` covered `x?: T` and missed the equivalent explicit union
+      // `x: T | undefined` — the SAME `Ty` (line 3004 runs the `?` spelling through the
+      // very same `makeNullable("undefined", …)`), so nothing downstream could tell the
+      // two apart, and the second one left the slot zero. `x: number | undefined` with no
+      // initializer is valid strict TypeScript (`tsc --strict` accepts it: `undefined` is
+      // in the declared type, so strictPropertyInitialization is satisfied) and node
+      // prints `undefined`; the binary died with SIGSEGV. Only the `undefined` arm is
+      // filled — `?N` (`T | null`) does not admit `undefined`, and a field typed that way
+      // and left unassigned is rejected by tsc for the same reason it has no value here.
+      if (init === undefined && isNullableTy(ty) && nullishKind(ty) === "undefined") init = this.undef();
       if (init !== undefined) fieldInits.push({ field: member, value: init });
       } finally {
         // `finally` also runs on the `continue`s above, so the scope is popped on every
@@ -3112,12 +3130,43 @@ class Parser {
       ctorBody = [{ kind: "ExprStmt", expr: { kind: "FieldAssign", object: this.ident("this"), field: "message", value: this.ident("message"), viaThis: true, inCtor: true } }];
     }
 
-    // Reject-don't-miscompile: fields are only initialized by the constructor. Without an
-    // explicit ctor, only initialized (and, for Error subclasses, `message`) fields are set;
-    // any other field would be uninitialized garbage — refuse rather than emit it.
-    if (!hadExplicitCtor) {
-      const covered = new Set([...fieldInits.map(fi => fi.field), ...(extendsError ? ["message"] : [])]);
-      for (const f of fields) if (!covered.has(f.key)) throw nyi(NYI.CLASS_FEATURE, `class '${name}' field '${f.key}' has no initializer and no constructor to initialize it`);
+    // Reject-don't-miscompile: fields are only initialized by the constructor, so a field
+    // nothing stores into is uninitialized garbage — refuse rather than emit it.
+    //
+    // This used to be gated on `!hadExplicitCtor`, which meant the guard stopped running
+    // the moment a class had ANY constructor, and that constructor was never checked for
+    // assigning every field. `class C { y: number; z: number; constructor(y: number) {
+    // this.y = y } }` then read `z` as the slot's zero and printed `0` where node prints
+    // `undefined` — both at exit 0, so nothing observed it. (`tsc --strict` rejects that
+    // program with TS2564, which is why no fixture carried the shape; refusing it is this
+    // compiler's own job.) There is no value of type `number` to serve, so it is refused
+    // for the same reason `let s: string; console.log(s);` is (NT1600).
+    //
+    // `ctorBody` already carries the prelude — parameter properties and field
+    // initializers were folded into it above — so ONE scan covers every way a field can
+    // be initialized, and the two cases no longer drift apart.
+    const covered = fieldsStoredViaThis(ctorBody);
+    // `extends Error`: `message` is slot 0 and `super(msg)` sets it, which is not a
+    // `this.f = …` store and so cannot appear in the scan above.
+    const stored = extendsError ? covered.add("message") : covered;
+    for (const f of fields) {
+      if (stored.has(f.key)) continue;
+      if (!hadExplicitCtor) {
+        throw nyi(NYI.CLASS_FEATURE, `class '${name}' field '${f.key}' has no initializer and no constructor to initialize it`);
+      }
+      // A TRUTHFUL hint, not the generic "this class feature is deferred" one: nothing is
+      // deferred here, the program simply has no answer at this type. Each of the three
+      // ways out is compiled against node in test/definite-assignment.test.ts (case 29),
+      // because a hint that names a fix which does not work is worse than no hint.
+      throw nyi(
+        NYI.CLASS_FEATURE,
+        `class '${name}' field '${f.key}' is never assigned by its constructor`,
+        `node reads an unassigned field as \`undefined\`, but '${f.key}' is declared `
+          + `'${f.ty}', which has no such value — the slot would be served as its zero `
+          + `(\`0\`/\`(null)\`) instead. Assign it in the constructor (\`this.${f.key} = …\`), `
+          + `give it an initializer (\`${f.key}: ${f.ty} = …\`), or widen the type to `
+          + `\`${f.ty} | undefined\`, which really does read as \`undefined\``,
+      );
     }
 
     // A FIELD naming its own class is a self-referential instance shape, which a flat
@@ -3268,10 +3317,11 @@ class Parser {
     const fnTy = makeFuncTy(fn.params.map((p) => p.annot ?? "number"), fn.returnAnnot);
     decorators.push({ kind: "VarDecl", declKind: "const", decls: [{ name: cname, annot: fnTy, init }] });
     // The replacement method: forward everything to the (once-)decorated value.
-    emitted.push({
+    const forward: FuncDecl = {
       kind: "FuncDecl", name: fn.name, params: fn.params, returnAnnot: fn.returnAnnot,
       body: [{ kind: "ReturnStmt", argument: { kind: "CallExpr", callee: this.ident(cname), args: fn.params.map((p) => this.ident(p.name)) } }],
-    } as FuncDecl);
+    };
+    emitted.push(forward);
   }
 
   /**
