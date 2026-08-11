@@ -39,24 +39,111 @@ Rules:
 
 - **Covered accessors:** array read `a[i]`, string index `s[i]`, `Uint8Array` read `u[i]` **and
   write** `u[i] = v` (including compound `u[i] += v`), and `arr.with(i, v)` (flat *and* past the
-  32-element persistent-trie threshold — node throws a `RangeError` here, so node stops too).
-  **Negative indices panic everywhere** (they are not Python-style wrap-around).
+  32-element persistent-trie threshold). **Negative indices panic everywhere** (they are not
+  Python-style wrap-around). See the next bullet for what node actually does at each of these —
+  the answer is not uniform, and the `.with` case is a real divergence, not a shared stop.
+- **What node does with a NEGATIVE index — and where our rule genuinely diverges.** Verified
+  against node, every case:
+
+  | expression | node | nativets |
+  |---|---|---|
+  | `a[-1]` on `[1,2,3]` | `undefined` | panic |
+  | `"abc"[-1]` | `undefined` | panic |
+  | `u[-1]` on a 3-byte array | `undefined` | panic |
+  | `u[-1] = 7` | silent no-op (sets a `"-1"` property) | panic |
+  | `[1,2,3].with(-1, 9)` | **`[1,2,9]`** | **panic** |
+  | `[1,2,3].with(-4, 9)` | `RangeError` | panic |
+  | `[1,2,3].with(3, 9)` | `RangeError` | panic |
+
+  **node never stops on a negative index at any of these accessors.** An earlier draft of this
+  section justified the whole negative-index rule with "node throws a `RangeError` here, so node
+  stops too". That is true **only when the index is out of range** — `i >= len`, or `i < -len`
+  for `.with`. It was never true for an *in-range* negative index, and it was never true at all
+  for `a[i]` / `s[i]` / `u[i]`, which are plain `undefined` in node. The claim is withdrawn.
+
+  The rule still stands for the four `undefined` rows, on the Stage-41 reasoning above,
+  unchanged: node's answer there is a phantom value, and propagating it quietly is the outcome
+  we rejected. **`.with(-1, v)` is the one row that reasoning does not cover** — node has a
+  defined, useful, non-phantom answer (`[1,2,9]`), and we abort on a correct program.
+  Recorded as a divergence rather than silently repaired: see **STILL OPEN** below.
 - **A panic is NOT an exception.** It deliberately does not go through the Stage-20
   pending-exception protocol: `try { a[5] } catch {}` still aborts, and a `finally` does not run.
   It stops the program; it is not a control-flow construct.
 - **`.at(i)` is the node-exact escape hatch** and is unchanged: it returns `T | undefined`
-  (`a.at(5)` → `undefined`, `a.at(-1)` → the last element), matching node byte for byte. It is the
-  documented way to ask "give me `undefined` instead of panicking", which is what the panic's
-  `help:` line names. `String#charAt(i)` is likewise untouched — node *defines* it as `""` out of
-  range, so it is not a defect and does not panic.
+  (`a.at(5)` → `undefined`, `a.at(-1)` → the last element), matching node byte for byte.
+  `String#charAt(i)` is likewise untouched — node *defines* it as `""` out of range, so it is not
+  a defect and does not panic.
+
+  **But `.at` is only the right advice for a NON-NEGATIVE read**, and both the `NT2002` hint and
+  the runtime `help:` line currently offer it unconditionally. Two ways that is wrong:
+
+  - **Negative index:** the hint on `a[-1]` reads "use `.at(-1)` if you want `undefined` instead
+    of a panic". `a.at(-1)` is **`3`**, not `undefined` — node's `a[-1]` is `undefined` and
+    `a.at(-1)` is the *last element*. Following the hint changes the program's answer instead of
+    preserving it. Same for `"abc".at(-1)` → `"c"` and `u.at(-1)` → the last byte.
+  - **Not a read:** on `u[i] = v` and on `arr.with(i, v)` the `help:` line still says `.at(…)`.
+    `.at` is a read — it cannot express either one, so the advice is not actionable at all.
+
+  Both are live defects in the diagnostics, not in this document; they are filed with repros
+  under "Reported, not fixed here" at the end of this section.
 - **Compile-time beats runtime.** When the length and the index are both statically known — a
   literal array/string, or a `const` bound to one, indexed by a numeric literal — the program is
   **rejected** with **`NT2002`** (`index 5 is out of bounds for an array of length 3`) rather than
   built and aborted. It is a real user error, hence the NT2xxx type-error band rather than the
   NT1xxx "not yet implemented" gradient, and `coverage` surfaces it.
+
+  **This covers index syntax only.** `a[5]`, `a[-1]` and `s[7]` on a `const` literal are all
+  `NT2002`; `a.with(5, 9)` and `a.with(-1, 9)` on the same `const` are **not** — they compile and
+  panic at run time, even though both operands are just as statically known. Not a correctness
+  hole (the program stops either way), but `.with` is listed as a covered accessor above and does
+  not get the compile-time treatment the other four do.
 - **Only written indices panic.** Compiler-generated in-bounds reads (`for-of`, the array HOFs,
   `JSON.stringify`, destructuring, spread-call expansion) keep the internal non-panicking
   accessor, so nothing pays twice and in-bounds programs are behaviourally unchanged.
+
+#### STILL OPEN — `.with(-1, v)` panics on a program node runs correctly
+
+The only row in the table above where we abort on a program node completes. Kept as an open
+divergence rather than repaired in this lane, because repairing it is a **behaviour change** and
+this is a documentation audit.
+
+```ts
+const a: number[] = [1, 2, 3];
+const b = a.with(-1, 9);   // node: [1,2,9]     nativets: panic, exit 134
+console.log(b[0], b[1], b[2]);
+```
+
+**What it would cost to match node.** Less than the other four rows, and that asymmetry is the
+argument for doing it. `a[-1]` → `undefined` cannot be matched without making every element read
+a nullable `T | undefined` box — the whole language pays for it, which is exactly the trade
+rejected above. **`.with` pays none of that**: it returns an array, never `undefined`, so the
+result type is unchanged and no box appears anywhere. The change is one line of index resolution
+at the accessor — `i < 0 ? i + len : i`, then the existing bounds check, which still panics for
+`i < -len` and `i >= len` where node throws a `RangeError` and stops too. Both the flat and the
+past-32 trie path go through it.
+
+So the negative-index rule is uniform in the code but **not** uniform in its justification: four
+accessors are covered by the Stage-41 phantom-value argument, and `.with` is covered by nothing
+except consistency with them. Whoever changes it should change the rule, not this document.
+
+#### Reported, not fixed here — two lying hints on this path
+
+Both are in files held by other lanes at the time of the audit, so they are filed rather than
+patched. Both are the "hint recommends code that does something else" class.
+
+1. **`src/checker.ts` (`NT2002` hint) — `.at(-1)` does not give `undefined`.** For a negative
+   literal index the hint reads ``use `.at(-1)` if you want `undefined` instead of a panic``.
+   Verified in node: `[1,2,3][-1]` is `undefined`, but `[1,2,3].at(-1)` is `3`. The hint's advice
+   silently changes the answer. Repro: `const a: number[] = [1,2,3]; console.log(a[-1]);`
+   Applies to strings (`"abc".at(-1)` → `"c"`) and `Uint8Array` alike. The suggestion is only
+   sound for a non-negative index; for a negative one the honest advice is `?? fallback` on
+   `.at(i)` **only if the wrap-around is wanted**, and otherwise a length check.
+2. **`runtime/runtime.c` (`nt_panic_bounds` help line) — `.at` is suggested for non-reads.** The
+   line is built once for every accessor, so a `Uint8Array` **write** (`u[-1] = 7`) and
+   `arr.with(-1, 9)` both advise ``use `.at(-1)` to get `undefined` instead of panicking``.
+   `.at` is a read and cannot express either operation. It also inherits defect 1 for every
+   negative index. The fix wants the suggestion to depend on the `what` argument the caller
+   already passes, rather than being unconditional.
 
 ### Decorators — a class method that assigns a field (`docs/decorators.md`)
 
