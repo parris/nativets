@@ -306,6 +306,45 @@ fill(xs);
 console.log(g(), xs.length);
 `);
   });
+
+  /*
+   * A marked parameter CAPTURED by a local arrow that hands it straight back into a marked
+   * slot — the recursive-walker shape, and the one `src/checker.ts` itself now runs on:
+   * `assertFacts(e, scope, out)` defines `const go = (x) => this.assertFacts(x, scope, out)`
+   * and the leaves of that walk are what `.push` the narrowing facts.
+   *
+   * It is a THIRD thing from the two rows already here. The NT1607 refusal above is a push
+   * written INSIDE the arrow, whose env could outlive the owner; the row just above is a
+   * captured LOCAL passed as the argument. This is a captured PARAMETER, so there is no
+   * owner in this frame at all — the array belongs to the caller and the arrow only
+   * forwards the borrow. Nothing here can outlive the call, and the caller must see every
+   * append the recursion makes.
+   */
+  test("a marked parameter CAPTURED by an arrow and forwarded into a marked slot", async () => {
+    await expectMatches(`
+function leaf(
+  //@@mutable
+  out: string[],
+  s: string,
+): void { out.push(s); }
+
+function walk(
+  //@@mutable
+  out: string[],
+  n: number,
+): void {
+  const go = (k: number): void => walk(out, k);
+  leaf(out, "n" + n);
+  if (n > 0) go(n - 1);
+}
+
+//@@mutable
+let acc: string[] = [];
+walk(acc, 3);
+walk(acc, 0);
+console.log(acc.length, acc.join(","));
+`);
+  });
 });
 
 describe("iterator invalidation reaches ACROSS the call", () => {
