@@ -169,8 +169,10 @@ describe("the trims compose and chain", () => {
  *   ALREADY SAFE by the same self-identifying argument, fixed earlier under §A.4:
  *     `toUpperCase`/`toLowerCase`.
  *   BYTE-ORIENTED, so they cannot re-frame anything by construction: `charCodeAt`, `.at`,
- *     `s[i]`, `slice`/`substring`, `split`, `indexOf`/`includes`, and `for…of` over a
- *     string. These are §A.2 proper and are unchanged here.
+ *     `s[i]`, `slice`/`substring`, `split`, `indexOf`/`includes`. These are §A.2 proper and
+ *     are unchanged here. `for…of` was listed here too, and that was the DEFECT the next
+ *     block closes: it is an ITERATOR, the same one `Array.from` is, so byte framing put
+ *     the two on different answers for one ordinary string.
  * Refused, so they cannot miscompile anything: `normalize` and `localeCompare` (both
  * NYI.WEBAPI — they need ICU) and `[...str]` (NT2001). Ordering (`<`, `>`) is `js_str_cmp`,
  * a plain `strcmp` over the bytes, which has no decode step to get wrong.
@@ -406,9 +408,156 @@ describe("ill-formed UTF-8 is never re-framed (the shared UTF-8 decoder)", () =>
     /** `E2 80 81 41 78 78` — U+2001 EM QUAD then ASCII. 4 code points, 6 bytes. */
     const S3 = `const s = "\\u2001Axx";\n`;
 
+    /** `F0 9F 98 80 41` — U+1F600, which node holds as a SURROGATE PAIR, then ASCII. */
+    const S4 = `const s = "\\u{1f600}A";\n`;
+    /** The loop, as a one-liner: count, then the pieces, then the round trip. */
+    const WALK =
+      `let n = 0;\nlet j = "";\nfor (const c of s) { n = n + 1; j = j + "[" + c + "]"; }\n` +
+      `console.log(n);\nconsole.log(j);\nconsole.log(j.split("[").join("").split("]").join("") === s);\n`;
+
     test("`for…of` over a multi-byte string counts CODE POINTS, matching node", async () => {
       await sameBytesAsNode(
         S3 + `let n = 0;\nfor (const c of s) { n = n + 1; }\nconsole.log(n);\n`,
+      );
+    });
+
+    // The COUNT is only half of it: a loop that emitted 4 pieces of the wrong bytes would
+    // pass the test above. These compare the pieces themselves, raw, against node.
+    test("the PIECES are whole characters, byte-for-byte with node (3-byte)", async () => {
+      await sameBytesAsNode(S3 + WALK);
+    });
+
+    test("an ASTRAL character is ONE piece — node's surrogate pair is not two steps", async () => {
+      // node's `for…of` yields the code point, not the two UTF-16 halves; ours yields the
+      // 4-byte UTF-8 sequence, which prints as the same bytes. This is agreement we did
+      // NOT have before: the byte-framed loop ran 5 times here and printed 5 mojibake pieces.
+      await sameBytesAsNode(S4 + WALK);
+    });
+
+    test("ASCII and the EMPTY string are unchanged", async () => {
+      await sameBytesAsNode(`const s = "abc";\n` + WALK);
+      await sameBytesAsNode(`const s = "";\n` + WALK);
+    });
+
+    // ---- the three spellings, side by side. ----------------------------------------
+    test("`for…of` and `Array.from` agree on EVERY input — they are one iterator", async () => {
+      // Well formed and ill formed, ASCII through astral, in one program. The two columns
+      // must be equal on every row; that equality is the property, not the numbers.
+      const src =
+        `const xs: string[] = ["", "abc", "\\u00e9", "\\u2001Axx", "\\u{1f600}A",` +
+        ` "\\u2001".slice(0, 2) + "Axx", String.fromCharCode(0xd800)];\n` +
+        `for (const s of xs) {\n` +
+        `  let n = 0;\n  let j = "";\n` +
+        `  for (const c of s) { n = n + 1; j = j + c; }\n` +
+        `  console.log(n, n === Array.from(s).length, j === s);\n` +
+        `}\n`;
+      const ours = await bytesOf(src);
+      expect(ours.exitCode).toBe(0);
+      // Counts: 0 empty, 3 ASCII, 1 e-acute, 4 (EM QUAD + Axx), 2 (emoji + A), 5 (the
+      // ill-formed lead pair, one byte each, then Axx), 1 (a lone surrogate is WTF-8 and
+      // decodes as itself). Every row's second column is `true` — one iterator, one answer
+      // — and every third is `true`: the walk is LOSSLESS, ill-formed input included.
+      expect(ours.stdout.toString("latin1")).toBe(
+        "0 true true\n3 true true\n1 true true\n4 true true\n2 true true\n5 true true\n1 true true\n",
+      );
+    });
+
+    test("`split(\"\")` stays on BYTES, and that is what keeps node's two identities", async () => {
+      // node states both of these for `split("")` and holds them for every string,
+      // surrogate halves included. Ours holds them in the byte index space §A.2 defines,
+      // which is the whole reason this spelling did NOT move to code points with `for…of`.
+      const src =
+        `const xs: string[] = ["", "abc", "\\u00e9", "\\u2001Axx", "\\u{1f600}A"];\n` +
+        `for (const s of xs) {\n` +
+        `  const p = s.split("");\n` +
+        `  console.log(p.length === s.length, p.join("") === s);\n` +
+        `}\n`;
+      await sameBytesAsNode(src);
+    });
+
+    // ---- the ill-formed side: the policy is the neighbours', unchanged. ---------------
+    test("an ill-formed sequence is walked ONE BYTE AT A TIME, losslessly", async () => {
+      const ours = await bytesOf(
+        ILL + `let n = 0;\nlet j = "";\nfor (const c of s) { n = n + 1; j = j + c; }\n` +
+          `console.log(n, j === s, j.indexOf("A"));\n`,
+      );
+      expect(ours.exitCode).toBe(0);
+      // 5 — E2, 80, A, x, x — exactly what `Array.from` answers on the same string. A
+      // decoder that sized from the lead byte would say 3 and swallow the `A`.
+      expect(ours.stdout.toString("latin1")).toBe("5 true 2\n");
+    });
+
+    test("a lone surrogate is ONE step — WTF-8 tolerance survives the reframing", async () => {
+      const ours = await bytesOf(
+        `const g = String.fromCharCode(0xd800);\n` +
+          `let n = 0;\nlet cp = 0;\nfor (const c of g) { n = n + 1; cp = c.codePointAt(0)!; }\n` +
+          `console.log(n, cp, g.length);\n`,
+      );
+      expect(ours.exitCode).toBe(0);
+      // ONE step of THREE bytes, and the piece still reports 55296 — the answer node gives
+      // for `String.fromCharCode(0xd800).codePointAt(0)`. Rejecting the surrogate would
+      // frame it as three raw bytes and answer 237, LOSING that agreement.
+      expect(ours.stdout.toString("latin1")).toBe("1 55296 3\n");
+    });
+
+    // ---- lifetime: the character is now sometimes HEAP, which it never used to be. ----
+    test("an ASCII walk still allocates NOTHING — one-byte pieces are interned", async () => {
+      const ours = await bytesOf(
+        `let s = "abcdefghij";\nlet k = 0;\nwhile (k < 10) { s = s + s; k = k + 1; }\n` +
+          `const before = __strLive();\nlet n = 0;\n` +
+          `for (const c of s) { if (c === "a") { n = n + 1; } }\n` +
+          `console.log(n, __strLive() - before);\n`,
+      );
+      expect(ours.exitCode).toBe(0);
+      // 10,240 characters walked, of which 1,024 are "a", and ZERO strings left live.
+      expect(ours.stdout.toString("latin1")).toBe("1024 0\n");
+    });
+
+    test("a MULTI-BYTE walk releases each character as it advances", async () => {
+      const ours = await bytesOf(
+        `let s = "\\u2001\\u00e9\\u{1f600}";\nlet k = 0;\nwhile (k < 10) { s = s + s; k = k + 1; }\n` +
+          `const before = __strLive();\nlet n = 0;\n` +
+          `for (const c of s) { n = n + 1; }\n` +
+          `console.log(n, __strLive() - before);\n`,
+      );
+      expect(ours.exitCode).toBe(0);
+      // 3072 characters walked, ZERO left live. The pieces have to be heap strings (there
+      // is no interning a code point above 0xFF), so without the release in the update
+      // block this is 3072 — a leak invisible to LeakSanitizer, because every one of them
+      // is still REACHABLE from the rc table.
+      expect(ours.stdout.toString("latin1")).toBe("3072 0\n");
+    });
+
+    test("a piece OUTLIVES the step that produced it when the body keeps one", async () => {
+      // The release is what makes the leak test above pass; this is the other direction —
+      // it must not free a character the body still owns. `last` binds the loop variable,
+      // so it retains, and reading it after the loop must not be a use-after-free.
+      await sameBytesAsNode(
+        S3 + `let last = "";\nlet first = "";\n` +
+          `for (const c of s) { if (first === "") { first = c; } last = c; }\n` +
+          `console.log(first, last, first + last);\n`,
+      );
+    });
+
+    test("`break` and `continue` walk by code point too", async () => {
+      await sameBytesAsNode(
+        // `j.length` is deliberately NOT asserted: it is BYTES here and code units in
+        // node (§A.2), which is a divergence about `.length`, not about the walk.
+        S3 + `let j = "";\nfor (const c of s) { if (c === "x") { continue; } if (c === "A") { break; } j = j + c; }\n` +
+          `console.log(j, j === "\\u2001");\n`,
+      );
+      await sameBytesAsNode(
+        S4 + `let n = 0;\nfor (const c of s) { n = n + 1; break; }\nconsole.log(n);\n`,
+      );
+    });
+
+    test("NESTED string loops keep their own cursors", async () => {
+      await sameBytesAsNode(
+        // 16 pairs — 4 x 4 — which is the count the OUTER and INNER loops agreeing on the
+        // framing produces. Byte framing gave 36. `j.length` is bytes here, so the count
+        // comes from the piece list rather than from `.length` (§A.2).
+        S3 + `let j = "";\nlet n = 0;\nfor (const a of s) { for (const b of s) { n = n + 1; j = j + "|" + a + b; } }\n` +
+          `console.log(n, j);\n`,
       );
     });
   });

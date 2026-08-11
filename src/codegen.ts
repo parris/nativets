@@ -2057,22 +2057,22 @@ class FnGen {
         this.to(this.block(updLbl));
         const iU = this.fresh();
         this.emit(`${iU} = load double, ptr ${idx}`);
-        const iNv = this.fresh();
+        // The step is the CHARACTER's byte length for a string, 1 for everything else — see
+        // the body above. This is also where a string's character is handed back: a
+        // multi-byte one is a fresh rc-string (a one-byte one is an interned static, for
+        // which release is a documented no-op, so the two share one line). `updLbl` is
+        // reachable only from inside the body, so `chV` dominates it, and `continue` lands
+        // here too. `break`/`return` jump past it and leak ONE character — the same bounded
+        // shape, and the same reason, as the iterable temporary freed at `endLbl` below.
+        let step = "1.0";
         if (isStr) {
-          // The step is the CHARACTER's byte length, not 1 — see the body above. This is
-          // also where the character is handed back: a multi-byte one is a fresh rc-string
-          // (a one-byte one is an interned static, for which release is a documented
-          // no-op, so the two share one line). `updLbl` is reachable only from inside the
-          // body, so `chV` dominates it, and `continue` lands here too. `break`/`return`
-          // jump past it and leak ONE character — the same bounded shape, and the same
-          // reason, as the iterable temporary freed at `endLbl` below.
           const adv = this.fresh();
           this.emit(`${adv} = load double, ptr ${advS}`);
           this.emit(`call void @nt_str_release(ptr ${chV})`);
-          this.emit(`${iNv} = fadd double ${iU}, ${adv}`);
-        } else {
-          this.emit(`${iNv} = fadd double ${iU}, 1.0`);
+          step = adv;
         }
+        const iNv = this.fresh();
+        this.emit(`${iNv} = fadd double ${iU}, ${step}`);
         this.emit(`store double ${iNv}, ptr ${idx}`);
         this.terminate(`br label %${condLbl}`);
         this.to(this.block(endLbl));
