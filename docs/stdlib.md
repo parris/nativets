@@ -176,11 +176,13 @@ migrated to `new URL(...)` and are now differential against plain `node`.
 `.has(k)`, `.getAll(k)` (`string[]`), `.toString()` (re-serialized, `+`/`%XX` normalized).
 Read-only: `.append`/`.set`/`.delete`/`.sort` mutate, so they are refused.
 
-**`Object.freeze` / `isFrozen` / `getOwnPropertyNames`** — `freeze` is the **identity** and
-honestly so: objects are already immutable (Stage 29), so freezing changes nothing and node's
-contract (same object back, non-writable) is met exactly; `isFrozen` is constant-`true`;
-`getOwnPropertyNames` == `Object.keys` for a plain record. `Object.assign`/`defineProperty`/
-`setPrototypeOf` MUTATE their target → **`NT1606`** pointing at object spread.
+**`Object.freeze` / `getOwnPropertyNames`** — `freeze` is the **identity** and honestly so:
+objects are already immutable (Stage 29), so freezing changes nothing and node's contract (same
+object back, non-writable) is met exactly; `getOwnPropertyNames` == `Object.keys` for a plain
+record. `Object.assign`/`defineProperty`/`setPrototypeOf` MUTATE their target → **`NT1606`**
+pointing at object spread. **`isFrozen`/`isSealed`/`isExtensible` are REFUSED (`NT1002`)**:
+they report per-object runtime state we carry no bit for, and `isFrozen` used to answer a
+constant `true` where node says `false` for a never-frozen object — see `docs/divergences.md`.
 
 **`encodeURIComponent` / `decodeURIComponent` / `encodeURI` / `decodeURI`** — byte-exact per
 ECMAScript §19.2 (uppercase hex, the two different "unescaped" sets, `decodeURI` preserving the

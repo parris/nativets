@@ -54,12 +54,14 @@ async function run(source: string, file = "case.ts"): Promise<{ stdout: string; 
 }
 
 /** The compile-time half: what diagnostic (if any) does this source produce? */
-function compileError(source: string): { code: string; message: string } | null {
+function compileError(source: string): { code: string; message: string; hint: string } | null {
   try {
     sourceToIR(source);
     return null;
   } catch (e: any) {
-    return e.diag ? { code: e.diag.code, message: e.diag.message } : { code: "?", message: String(e) };
+    return e.diag
+      ? { code: e.diag.code, message: e.diag.message, hint: (e.diag.hint ?? "").replace(/\s+/g, " ") }
+      : { code: "?", message: String(e), hint: "" };
   }
 }
 
@@ -241,6 +243,37 @@ console.log(a[0], a[2], "abc"[1]);
 `)).toBe(null);
   });
 
+  /*
+   * The NT2002 hint has to survive being FOLLOWED. It used to end, for every index,
+   * with "use `.at(N)` if you want `undefined` instead of a panic" — true past the end,
+   * a different VALUE for a negative or fractional one (see the runtime section below).
+   */
+  describe("its hint is true for the index that was written", () => {
+    test("past the end: `.at(N)` really is `undefined`", () => {
+      const d = compileError(`const a: number[] = [1, 2, 3];\nconsole.log(a[5]);\n`);
+      expect(d?.hint).toBe("valid indices are 0..2; use `.at(5)` if you want `undefined` instead of a panic");
+    });
+
+    test("negative: `.at(-1)` is the LAST element, not `undefined`", () => {
+      const d = compileError(`const a: number[] = [1, 2, 3];\nconsole.log(a[-1]);\n`);
+      expect(d?.hint).not.toContain("if you want `undefined`");
+      expect(d?.hint).toContain("node reads `undefined` for a negative index");
+      expect(d?.hint).toContain("`.at(-1)` is NOT that: it counts from the END");
+    });
+
+    test("fractional: `.at(1.5)` truncates, so it is not `undefined` either", () => {
+      const d = compileError(`const a: number[] = [1, 2, 3];\nconsole.log(a[1.5]);\n`);
+      expect(d?.hint).not.toContain("if you want `undefined`");
+      expect(d?.hint).toContain("truncates towards zero");
+    });
+
+    test("an EMPTY container has no `.at` that returns anything", () => {
+      const d = compileError(`const a: number[] = [];\nconsole.log(a[0]);\n`);
+      expect(d?.hint).toContain("it is empty");
+      expect(d?.hint).toContain("`.at(0)`");
+    });
+  });
+
   test("a non-const or non-literal length is left to the runtime panic", () => {
     // `let` may be reassigned and a computed index is unknown — no compile-time claim.
     expect(compileError(`let a: number[] = [1, 2, 3];
@@ -416,6 +449,226 @@ console.log(u[0], u[1], u[2], u.length);
     const r = await run(src);
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toBe(runWithNode(src).stdout);
+  });
+});
+
+/* ============================================================
+ * A FRACTIONAL INDEX IS OUT OF BOUNDS — the runtime now agrees with the checker.
+ *
+ * Found by trying to write a truthful help line for one. The COMPILE-TIME half has
+ * always rejected `a[1.5]` (`checkStaticBounds` requires `Number.isInteger(idx)`, so
+ * `[1,2,3][1.5]` is NT2002) but the RUNTIME half truncated the double to an int64 and
+ * read the neighbouring element:
+ *
+ *     let i = 1.5;   a[i] -> 2      node: undefined
+ *                    s[i] -> "b"    node: undefined
+ *                    u[i] -> u[1]   node: undefined
+ *     u[i] = 7                      node: stores an ordinary property, NOT a byte
+ *
+ * exit 0 on both sides, no diagnostic — the same silent-wrong-answer class as reading
+ * past the end used to be, and the reason the bounds panic exists at all. A non-integer
+ * is not an index; it now panics like any other out-of-range one.
+ *
+ * `.with` is deliberately NOT changed: node's `.with` runs its index through
+ * ToIntegerOrInfinity, so `[1,2,3].with(1.7, 9)` really IS `[1,9,3]` — and ours already
+ * truncates to the same answer. Bracket indexing has no such coercion.
+ * ============================================================ */
+describe("a non-integer index is out of bounds at RUN time too, not truncated", () => {
+  for (const [name, src, len] of [
+    ["array", `const a: number[] = [1, 2, 3];\nlet i = 1.5;\nconsole.log(a[i]);\n`, 3],
+    ["string", `const s = "abc";\nlet i = 1.5;\nconsole.log(s[i]);\n`, 3],
+    ["Uint8Array read", `const u = new Uint8Array(3);\nlet i = 1.5;\nconsole.log(u[i]);\n`, 3],
+    ["Uint8Array write", `const u = new Uint8Array(3);\nlet i = 1.5;\nu[i] = 7;\nconsole.log("survived");\n`, 3],
+  ] as const) {
+    test(name, async () => {
+      const r = await run(src);
+      expect(r.stdout).toBe("");
+      expect(r.stderr).toContain(`panic: index out of bounds: the length is ${len} but the index is 1.5`);
+      expect(r.exitCode).toBe(134);
+    });
+  }
+
+  test("a whole-valued double is still a perfectly good index", async () => {
+    const src = `const a: number[] = [1, 2, 3];
+let i = 6 / 2 - 1;
+console.log(a[i], "abc"[i]);
+`;
+    const r = await run(src);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe(runWithNode(src).stdout);
+  });
+
+  test("`.with` is UNCHANGED — node truncates there, so truncating matches it", async () => {
+    const src = `const a: number[] = [1, 2, 3];
+let i = 1.7;
+console.log(a.with(i, 9).join(","));
+`;
+    const r = await run(src);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe(runWithNode(src).stdout);
+    expect(r.stdout).toBe("1,9,3\n");
+  });
+});
+
+/* ============================================================
+ * THE HELP LINE HAS TO BE TRUE.
+ *
+ * `nt_panic_bounds` used to compose ONE help line for every accessor and every index:
+ *
+ *     help: <what> is out of range; use `.at(i)` to get `undefined` instead of panicking
+ *
+ * Measured against node, that is only true for a READ at or past the end. Everywhere
+ * else, FOLLOWING IT DOES NOT AVOID THE PANIC — IT RETURNS A DIFFERENT VALUE:
+ *
+ *     [1,2,3][-1]   -> undefined      [1,2,3].at(-1)   -> 3      (the LAST element)
+ *     "abc"[-1]     -> undefined      "abc".at(-1)     -> "c"
+ *     [1,2,3][1.5]  -> undefined      [1,2,3].at(1.5)  -> 2      (truncates)
+ *     [1,2,3][NaN]  -> undefined      [1,2,3].at(NaN)  -> 1      (element 0)
+ *
+ * and for a `.with` or a typed-array WRITE, `.at` is a READ and cannot express the
+ * operation at all — yet both were told to use it.
+ *
+ * `nt_panic_bounds` already takes `what`, so the suggestion is keyed on it (and on the
+ * index). Every line below is EXECUTED against node in the "the advice compiles and
+ * matches node" tests: a hint whose advice is never run is a hint nobody checked.
+ * ============================================================ */
+describe("the panic's help line is true for the accessor that faulted", () => {
+  /** The `help:` line of a panic, whitespace-normalized. */
+  const help = (stderr: string): string => (stderr.match(/^ {2}help: (.*)$/m)?.[1] ?? "").replace(/\s+/g, " ");
+
+  describe("a READ at or past the end — `.at(i)` really is `undefined` there", () => {
+    test("array", async () => {
+      const r = await run(`const a: number[] = [1, 2, 3];\nlet i = 5;\nconsole.log(a[i]);\n`);
+      expect(help(r.stderr)).toContain("use `.at(5)` to get `undefined` instead of panicking");
+    });
+  });
+
+  describe("a NEGATIVE read — `.at` counts from the END, so it is a different value", () => {
+    for (const [name, src, at] of [
+      ["array", `const a: number[] = [1, 2, 3];\nlet i = -1;\nconsole.log(a[i]);\n`, "`.at(-1)`"],
+      ["string", `const s = "abc";\nlet i = -1;\nconsole.log(s[i]);\n`, "`.at(-1)`"],
+      ["Uint8Array", `const u = new Uint8Array(4);\nlet i = -2;\nconsole.log(u[i]);\n`, "`.at(-2)`"],
+    ] as const) {
+      test(name, async () => {
+        const h = help((await run(src)).stderr);
+        // The defect verbatim: it must NOT promise `undefined` from `.at`.
+        expect(h).not.toContain("to get `undefined` instead of panicking");
+        expect(h).toContain("node reads `undefined` for a negative index");
+        expect(h).toContain(`${at} is NOT that: it counts from the END`);
+      });
+    }
+  });
+
+  describe("a NON-INTEGER read — `.at` truncates, and `.at(NaN)` reads element 0", () => {
+    test("a fractional index", async () => {
+      const h = help((await run(`const a: number[] = [1, 2, 3];\nlet i = 1.5;\nconsole.log(a[i]);\n`)).stderr);
+      expect(h).not.toContain("to get `undefined` instead of panicking");
+      expect(h).toContain("truncates towards zero");
+    });
+
+    test("NaN", async () => {
+      const h = help((await run(`const a: number[] = [1, 2, 3];\nlet i = 0 / 0;\nconsole.log(a[i]);\n`)).stderr);
+      expect(h).not.toContain("to get `undefined` instead of panicking");
+      expect(h).toContain("`.at(NaN)` reads element 0");
+    });
+  });
+
+  describe("a typed-array WRITE — `.at` is a read and cannot express it", () => {
+    for (const [name, src] of [
+      ["past the end", `const u = new Uint8Array(4);\nlet i = 4;\nu[i] = 255;\n`],
+      ["negative", `const u = new Uint8Array(4);\nlet i = -2;\nu[i] = 1;\n`],
+    ] as const) {
+      test(name, async () => {
+        const h = help((await run(src)).stderr);
+        expect(h).not.toMatch(/use `\.at\(/);
+        expect(h).toContain("node silently DISCARDS an out-of-range typed-array write");
+        expect(h).toContain("`.at(");           // …only to say it is a READ and cannot do this
+        expect(h).toContain("is a READ and cannot express a write");
+      });
+    }
+  });
+
+  describe("`.with(i, v)` — a pure UPDATE, which `.at` cannot express either", () => {
+    test("a negative index: node counts from the end, so name the equivalent", async () => {
+      const h = help((await run(`const a: number[] = [1, 2, 3];\nlet i = -1;\nconsole.log(a.with(i, 9).join(","));\n`)).stderr);
+      expect(h).not.toMatch(/`\.at\(/);
+      expect(h).toContain("node's `.with` counts a negative index from the END");
+      expect(h).toContain("write `.with(a.length - 1, v)`");
+    });
+
+    test("past the end: node throws RangeError too, so point at the spread", async () => {
+      const h = help((await run(`const a: number[] = [1, 2, 3];\nlet i = 5;\nconsole.log(a.with(i, 9).join(","));\n`)).stderr);
+      expect(h).not.toMatch(/`\.at\(/);
+      expect(h).toContain("RangeError: Invalid index : 5");
+      expect(h).toContain("[...a, v]");
+    });
+
+    test("a negative index that is still past the START gets the RangeError line", async () => {
+      const h = help((await run(`const a: number[] = [1, 2, 3];\nlet i = -4;\nconsole.log(a.with(i, 9).join(","));\n`)).stderr);
+      expect(h).toContain("RangeError: Invalid index : -4");
+    });
+  });
+
+  /*
+   * THE STANDING RULE: compile the advice and run it against node. Sixteen lying
+   * diagnostics were found in one day, and this is the only check that catches the class.
+   */
+  describe("the advice compiles and matches node", () => {
+    for (const [name, src] of [
+      // "test the index first" for a negative read — node's `a[-1]` is `undefined`.
+      ["guarding a negative read reproduces node's `undefined`",
+       `const a: number[] = [1, 2, 3];
+let i = -1;
+console.log(i >= 0 && i < a.length ? String(a[i]) : "undefined");
+console.log(String(a[-1 + 1]));
+`],
+      // "…or use `.at()` deliberately if the element from the end is what you meant".
+      ["`.at(-1)` really is the LAST element, which is what the help says it is",
+       `const a: number[] = [1, 2, 3];
+const s = "abc";
+console.log(String(a.at(-1)), String(s.at(-1)));
+`],
+      // `.with(a.length - 1, v)` is node's `.with(-1, v)`.
+      ["`.with(a.length - 1, v)` equals node's `.with(-1, v)`",
+       `const a: number[] = [1, 2, 3];
+console.log(a.with(a.length - 1, 9).join(","));
+console.log(a.with(-1 + a.length, 9).join(","));
+`],
+      // "to APPEND, spread instead: `[...a, v]`".
+      ["`[...a, v]` appends where an out-of-range `.with` cannot",
+       `const a: number[] = [1, 2, 3];
+const b: number[] = [...a, 9];
+console.log(b.join(","), a.join(","));
+`],
+      // "test `i >= 0 && i < u.length` before writing" — node DISCARDS the write, so a
+      // guarded no-op is the node-identical program.
+      ["guarding a typed-array write reproduces node's silent discard",
+       `const u = new Uint8Array(3);
+let i = 5;
+if (i >= 0 && i < u.length) { u[i] = 7; }
+console.log(u[0], u[1], u[2], u.length);
+`],
+    ] as const) {
+      test(name, async () => {
+        const r = await run(src);
+        expect(r.exitCode).toBe(0);
+        expect(r.stdout).toBe(runWithNode(src).stdout);
+      });
+    }
+
+    /*
+     * The counter-case, kept as an executable record of WHY the old hint was wrong:
+     * node's `a[-1]` and node's `a.at(-1)` disagree, so "use `.at(-1)`" changed the
+     * answer. Both sides run under node here — nothing to compile — but if `.at`'s
+     * relative indexing ever stopped being relative, this is the test that says so.
+     */
+    test("node itself proves `a[-1]` and `a.at(-1)` are different values", () => {
+      const src = `const a = [1, 2, 3];
+console.log(String(a[-1]), String(a.at(-1)));
+console.log(String("abc"[-1]), String("abc".at(-1)));
+`;
+      expect(runWithNode(src).stdout).toBe("undefined 3\nundefined c\n");
+    });
   });
 });
 
