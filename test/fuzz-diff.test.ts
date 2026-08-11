@@ -57,10 +57,13 @@ describe("fuzz findings — Array#includes", () => {
    * `Set#has` / `Map#has` / `Map#get`, which handle both NaN and -0 the node way — so this
    * is one method, not a model-wide gap.
    */
-  it.failing("`[NaN].includes(NaN)` is true (SameValueZero), not false", async () => {
+  /* FIXED — `nt_arr_includes_num` now picks its predicate on `isnan(needle)`; the full
+   * behavior (±0, past the 32-element vector threshold, the untouched siblings) is
+   * covered in test/array-includes.test.ts. */
+  it("`[NaN].includes(NaN)` is true (SameValueZero), not false", async () => {
     await expectSameBytes([
       "const a = [NaN, 1];",
-      "console.log(a.includes(NaN));",   // node true, ours false
+      "console.log(a.includes(NaN));",   // node true, ours true
       "console.log(a.indexOf(NaN));",    // node -1, ours -1 — correct
       "console.log([1, 2].includes(NaN));",
       "const s = new Set<number>([NaN, 1]);",

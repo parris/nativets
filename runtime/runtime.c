@@ -1226,7 +1226,25 @@ const char *nt_arr_join_str(NtArray *a, const char *sep) {
   }
   const char *r = sb_finish(&sb); nt_str_register((void *)r); return r;
 }
+/* `.includes` is SameValueZero (ES 23.1.3.16 -> 7.2.11), NOT the strict equality the two
+ * `indexOf` routines below use. SameValueZero differs from `===` at exactly ONE pair of
+ * values: NaN equals NaN. C `==` is IEEE-754 equality, which is false whenever either
+ * operand is NaN, so the plain scan answered `[NaN].includes(NaN)` with `false` where node
+ * says `true` — at exit 0, so a silent wrong answer.
+ *
+ * The needle is tested for NaN ONCE, outside the loop, and picks the predicate: a NaN
+ * needle matches a NaN element and nothing else, and a non-NaN needle keeps `==` exactly
+ * (so a NaN ELEMENT never answers a non-NaN needle — NaN must not become a wildcard).
+ *
+ * It is SameValueZero and not SameValue: `+0` and `-0` are the SAME value here, which
+ * `==` already gets right and which SameValue would get wrong. Do not "tighten" this into
+ * a bit compare — `[-0].includes(0)` is `true` in node. `indexOf`/`lastIndexOf` stay on
+ * `==` deliberately; `[NaN].indexOf(NaN)` is -1. See test/array-includes.test.ts. */
 int32_t nt_arr_includes_num(NtArray *a, double x) {
+  if (isnan(x)) {
+    for (int64_t i = 0; i < a->len; i++) if (isnan(slot_to_num(arr_at(a, i)))) return 1;
+    return 0;
+  }
   for (int64_t i = 0; i < a->len; i++) if (slot_to_num(arr_at(a, i)) == x) return 1;
   return 0;
 }
