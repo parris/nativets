@@ -275,10 +275,16 @@ describe("fuzz findings — base64", () => {
 describe("fuzz findings — non-ASCII case mapping", () => {
   /*
    * §A.2 documents that string LENGTH and SLICING are UTF-8 byte oriented. It does not cover
-   * case mapping, and `toUpperCase`/`toLowerCase` are a no-op outside ASCII — the bytes are
-   * well-formed UTF-8, they are simply the unmapped input, so nothing signals the miss.
+   * case mapping, and `toUpperCase`/`toLowerCase` were a no-op outside ASCII — the bytes are
+   * well-formed UTF-8, they are simply the unmapped input, so nothing signalled the miss.
+   *
+   * FIXED: both now map U+0000..U+017F (ASCII, Latin-1 Supplement, Latin Extended-A)
+   * exactly. The range is bounded because `runtime/` is libc-only, which rules out the
+   * locale-dependent `towupper` and the full Unicode tables alike; from U+0180 up the
+   * mapping is the identity and that boundary is now documented (docs/divergences.md §A.4).
+   * The exhaustive sweeps live in `test/case-mapping.test.ts`.
    */
-  it.failing("toUpperCase/toLowerCase map non-ASCII letters", async () => {
+  it("toUpperCase/toLowerCase map non-ASCII letters", async () => {
     await expectSameBytes([
       'console.log("\\u00e9".toUpperCase());', // node É, ours é
       'console.log("\\u00c9".toLowerCase());', // node é, ours É
