@@ -110,6 +110,16 @@ const CASES = [
   // `rectypes` layout hazard too, and annotates a local arrow to pin that the rename does
   // NOT reach the entry module's own spelling.
   "arrow-retannot",
+  // EXPLICIT call-site type arguments (`firstOf<Point>(xs)`) in a non-entry module.
+  // `Renamer.expr`'s `NewExpr` arm rewrote `typeArgs` and its `CallExpr` arm did not, so
+  // the argument named that module's PRE-rename `Point`/`@Expr` while the declaration was
+  // alpha-renamed, and the call printed two spellings of one type: `expects Point{x:number}[],
+  // got _m0_Point{x:number}[]`. `typeArgs` is set by the PARSER, so — like `retAnnot` above
+  // and unlike `paramTys`/`retTy`/`valTy` — it is live at LINK time. Fourth instance of the
+  // walker-misses-a-field class (`nonnull`, `loopvar`, `arrow-retannot`). Both maps
+  // `rewriteTy` threads are covered (a class TAG and a recursive `@N` back-edge), and the
+  // already-correct `NewExpr` arm is exercised so the fix cannot be a move rather than an add.
+  "calltypeargs",
 ];
 
 describe("modules (differential vs node)", () => {

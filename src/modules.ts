@@ -280,12 +280,34 @@ class Renamer {
       case "NonNullExpr": this.expr(e.expr); return;
       case "InExpr": this.expr(e.key); this.expr(e.object); return;
       case "InstanceOfExpr": e.className = this.n(e.className); this.expr(e.object); return;
-      case "NewExpr":
+      case "NewExpr": {
         e.callee = this.n(e.callee);
-        if (e.typeArgs) e.typeArgs = e.typeArgs.map((t) => this.t(t)!);
+        // Bound to a LOCAL before the guard, not narrowed in place on the field. Both
+        // spellings are the same program under tsc, but `if (e.typeArgs) e.typeArgs.map(…)`
+        // is NT1002 here (`method call on ?Ustring[]` — the narrowing does not survive the
+        // member access), and this file has to stay inside the subset nativets compiles
+        // ITSELF in. Verified on the exact shape against node before adopting it.
+        const ta = e.typeArgs;
+        if (ta) e.typeArgs = ta.map((t) => this.t(t)!);
         e.args.forEach((a) => this.expr(a));
         return;
-      case "CallExpr": this.expr(e.callee); e.args.forEach((a) => this.expr(a)); return;
+      }
+      // `typeArgs` are EXPLICIT call-site type arguments (`countOf<Point>(xs)`), and they
+      // were the FOURTH field this walker visited a node and missed — after `NonNullExpr`/
+      // `InExpr`, `ForOfStmt.name2` and `ArrowFunction.retAnnot` above. The `NewExpr` arm
+      // right above has always rewritten its own `typeArgs`; this one did not, so an
+      // explicit type argument in a non-entry module kept that module's PRE-rename spelling
+      // while the declaration it names was alpha-renamed, and the call met the two
+      // spellings as two types: `expects Point{x:number}[], got _m0_Point{x:number}[]`.
+      // Like `retAnnot` — and unlike `paramTys`/`retTy`/`ForOfStmt.valTy`, which the checker
+      // fills in AFTER the link — `typeArgs` is set by the PARSER, so it is live here.
+      // See test/modules/calltypeargs.
+      case "CallExpr": {
+        const ta = e.typeArgs;
+        if (ta) e.typeArgs = ta.map((t) => this.t(t)!);
+        this.expr(e.callee); e.args.forEach((a) => this.expr(a));
+        return;
+      }
       case "ArrowFunction": {
         const a = e as ArrowFunction;
         a.params.forEach((p) => this.param(p));
