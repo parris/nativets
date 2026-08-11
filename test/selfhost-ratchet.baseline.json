@@ -1,11 +1,11 @@
 {
   "recordedAt": {
     "date": "2026-08-11",
-    "rev": "55c4794"
+    "rev": "793e535"
   },
   "modules": {
     "ast.ts": {
-      "sha256": "7d406b584cb90720",
+      "sha256": "1485fd120c1642f0",
       "standalone": {
         "stage": "clear",
         "code": "",
@@ -18,7 +18,7 @@
       }
     },
     "checker.ts": {
-      "sha256": "e0eac83cfe258525",
+      "sha256": "3c69a4fdb2d15117",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -26,8 +26,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Property 'diag' does not exist on unknown at L:C"
+        "code": "NT1002",
+        "message": "[NT1002] structuredClone of the recursive type {kind:string,name:string,params:@_nt_m0_Param[],returnAnnot:?Ustring,body:@_nt_m0_Stmt[],endDrops:?Ustring[],typeParams:undefined,copyThis:?Uboolean,sett…"
       }
     },
     "cli.ts": {
@@ -45,7 +45,7 @@
       }
     },
     "codegen.ts": {
-      "sha256": "a338b757bc421e53",
+      "sha256": "5e26b34847a09263",
       "standalone": {
         "stage": "check",
         "code": "NT1012",
@@ -53,8 +53,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Property 'diag' does not exist on unknown at L:C"
+        "code": "NT1002",
+        "message": "[NT1002] structuredClone of the recursive type {kind:string,name:string,params:@_nt_m0_Param[],returnAnnot:?Ustring,body:@_nt_m0_Stmt[],endDrops:?Ustring[],typeParams:undefined,copyThis:?Uboolean,sett…"
       }
     },
     "coverage-preprocess.ts": {
@@ -85,7 +85,7 @@
       }
     },
     "diagnostics.ts": {
-      "sha256": "c3a9ee1cfbf7e97d",
+      "sha256": "985aa330044ab075",
       "standalone": {
         "stage": "clear",
         "code": "",
@@ -98,7 +98,7 @@
       }
     },
     "driver.ts": {
-      "sha256": "97e2608c847c04dc",
+      "sha256": "c97fa07ff97c3f2a",
       "standalone": {
         "stage": "check",
         "code": "NT1003",
@@ -125,7 +125,7 @@
       }
     },
     "modules.ts": {
-      "sha256": "1f9bf67a77528f08",
+      "sha256": "6927f2b7ed47400b",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -138,7 +138,7 @@
       }
     },
     "ownership.ts": {
-      "sha256": "84f73899e55fe24e",
+      "sha256": "093c144e6fd1f34f",
       "standalone": {
         "stage": "check",
         "code": "NT1003",
@@ -147,12 +147,12 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Property 'diag' does not exist on unknown at L:C"
+        "code": "NT1002",
+        "message": "[NT1002] structuredClone of the recursive type {kind:string,name:string,params:@_nt_m0_Param[],returnAnnot:?Ustring,body:@_nt_m0_Stmt[],endDrops:?Ustring[],typeParams:undefined,copyThis:?Uboolean,sett…"
       }
     },
     "parser.ts": {
-      "sha256": "251476258d37360c",
+      "sha256": "e23afbce717cef85",
       "standalone": {
         "stage": "check",
         "code": "NT2001",

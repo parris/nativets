@@ -505,7 +505,15 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // `.push` legal on a `@@mutable` accumulator, nothing stops here any more and all four
   // walk through to ast.ts's ONE `trimEnd` site (NT1002). driver.ts goes to lexer.ts's
   // NT2001 instead. Neither lane could have measured this alone.
-  "checker.ts": { rung: 0, code: "NT2001", blame: "self" },
+  // ADVANCED 2026-08-11 through FIVE blockers in one sitting, NT2001 -> NT1002. The first
+  // was one expression — `const asBlocker = (fn, e: unknown) => e instanceof NTError ? e.diag…`,
+  // where `instanceof` does not narrow an `unknown` here — and it was the first blocker of
+  // checker.ts, codegen.ts AND ownership.ts at once. Behind it, in order: `collectBlockers.push`
+  // (NT1606, needed the `//@@mutable` parameter opt-in, which in turn needed the parameter to
+  // stop being OPTIONAL because the marker rejects `?U…[]`), the catch binding still typing
+  // `string` (needed transitive raise inference), and `program.body = …` (NT1606, now a new
+  // `Program` at the return). It now stops on `structuredClone` of the recursive `FuncDecl`.
+  "checker.ts": { rung: 0, code: "NT1002", blame: "self" },
   // Left NT1015 (static members) and reached further — an unnamed parse error at 582:33.
   // ...then NT1023 on `ModuleGen.build`, same accumulator shape, same `//@@mutable` fix,
   // and behind it NT1015 again — this time a `get` accessor in `FnGen`, ~165 lines deeper.
@@ -516,7 +524,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // Left NT1002 when `in` landed. MEASURED, not assumed: the lane predicted codegen.ts
   // would stop on its OWN four `Record` tables, and it does not — ast.ts's HOST_MODULES
   // fires first through the link. Its own tables are the same shape and sit behind it.
-  "codegen.ts": { rung: 0, code: "NT2001", blame: "checker.ts" },
+  "codegen.ts": { rung: 0, code: "NT1002", blame: "checker.ts" },   // inherited — see checker.ts
   // The NT1702 is GONE, and it was never a missing language feature — it was a defect in
   // the compiler's OWN module graph. `coverage.ts → coverage-preprocess.ts → coverage.ts`,
   // closed by `import type { Blocker }`. node and bun erase that edge, so the cycle did not
@@ -548,7 +556,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // The Map spread in `clone` was the one blocker this module ever owned in the STANDALONE
   // column, and clearing it makes that column BLIND: what it reports now is the unlinked-import
   // artifact (see the ratchet baseline). Linked, it still inherits, as it always has.
-  "ownership.ts": { rung: 0, code: "NT2001", blame: "checker.ts" },
+  "ownership.ts": { rung: 0, code: "NT1002", blame: "checker.ts" }, // inherited — see checker.ts
   "driver.ts": { rung: 0, code: "NT1014", blame: "parser.ts" },
   // Stage-1's entry point now stops on its OWN code for the first time: calling the async
   // `buildBinary` without `await`. Not a dependency's blocker.

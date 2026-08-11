@@ -297,7 +297,7 @@ export function measure(entryPath: string): BlockerReport {
   if (firstBlocker !== null) {
     // The collecting pass. It is EXPECTED to throw after the loop — the passes below it
     // assume every body typed — and the array we already hold is the result either way.
-    try { check(linkProgram(source, entry), blockers); } catch { /* see above */ }
+    try { check(linkProgram(source, entry), blockers, true); } catch { /* see above */ }
     if (blockers.length === 0) {
       throw new MetricAborted(
         `${show(entry)}: the check aborted OUTSIDE the per-function loop, so there is no ` +

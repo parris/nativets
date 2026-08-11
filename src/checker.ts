@@ -937,7 +937,20 @@ export interface FnBlocker { fn: string; code: string; message: string }
  *
  * Omit the argument and this is the pre-existing function, byte for byte.
  */
-export function check(program: Program, collectBlockers?: FnBlocker[]): CheckedProgram {
+export function check(
+  program: Program,
+  // ACCUMULATOR PARAMETER, marked — `collectBlockers.push(…)` on an unmarked array
+  // parameter is NT1606, the next blocker of checker.ts/codegen.ts/ownership.ts once the
+  // `unknown` one below cleared.
+  //
+  // A PLAIN array with a default, plus a separate `measuring` flag, because the opt-in
+  // does not accept a NULLABLE array: `collectBlockers?: FnBlocker[]` is `?U…[]` and the
+  // marker answers NT1023 ("not an array"). The optional parameter was also the only
+  // thing distinguishing measurement mode, so that job moves to the flag.
+  //@@mutable
+  collectBlockers: FnBlocker[] = [],
+  measuring: boolean = false,
+): CheckedProgram {
   // Value bindings this module imports. A linked program has none left (the linker
   // rewrites them to concrete names), so this is populated only for a single-module
   // check — where it turns "unknown callee" into "you did not link".
@@ -1050,13 +1063,19 @@ export function check(program: Program, collectBlockers?: FnBlocker[]): CheckedP
   // move its own denominator (and, since a `catch (e)` binding types as the erased class,
   // its own numerator too — the tool caught exactly that when this was a `function`).
   // `check` is already in the failing set, so an arrow in its body costs nothing.
-  const asBlocker = (fn: string, e: unknown): FnBlocker =>
-    e instanceof NTError
-      ? { fn, code: e.diag.code, message: e.diag.message }
-      : { fn, code: `(${(e as Error).name})`, message: (e as Error).message };
+  // `e: NTError`, with the narrowing done at the CALL SITE below rather than inside.
+  // It used to take `unknown` and narrow internally, which tsc is happy with and this
+  // compiler is not: `e instanceof NTError` does not narrow an `unknown` here, so
+  // `e.diag` was `Property 'diag' does not exist on unknown` — the FIRST blocker of
+  // checker.ts, codegen.ts AND ownership.ts, i.e. one expression holding three of the
+  // twelve modules off IR. Narrowing at the call site satisfies both toolchains.
+  const asBlocker = (fn: string, e: NTError): FnBlocker => ({ fn, code: e.diag.code, message: e.diag.message });
   for (const s of program.body) if (s.kind === "FuncDecl" && !s.typeParams?.length) {
-    if (collectBlockers === undefined) c.checkFunction(s, moduleScope.child());
-    else try { c.checkFunction(s, moduleScope.child()); } catch (e) { collectBlockers.push(asBlocker(s.name, e)); }
+    if (!measuring) c.checkFunction(s, moduleScope.child());
+    else try { c.checkFunction(s, moduleScope.child()); } catch (e) {
+      if (!(e instanceof NTError)) throw e;   // an internal error is a compiler bug, not a blocker
+      collectBlockers.push(asBlocker(s.name, e));
+    }
   }
   // M3: check every specialization that got instantiated above (checking one body can
   // instantiate more generics, so drain to a fixpoint), then SPLICE the templates out of
@@ -1065,13 +1084,19 @@ export function check(program: Program, collectBlockers?: FnBlocker[]): CheckedP
   // the globals table is read: a specialization's body can be the only reader of a
   // module-level binding, and that read must still promote it to a global.
   c.drainInstantiations(() => moduleScope.child());
-  program.body = [
+  // A LOCAL body plus a NEW `Program` at the return, rather than `program.body = …`.
+  // Writing the field is NT1606 ("objects are immutable") and was the blocker holding
+  // checker.ts, codegen.ts and ownership.ts off IR once the three above it cleared. The
+  // contract is unchanged: every caller uses the RETURN value (`driver.ts`'s
+  // `const checked = check(…)`), and the statement nodes themselves are the same objects,
+  // so the passes below still see exactly what they saw.
+  const checkedBody: Stmt[] = [
     ...program.body.filter((s) => !(s.kind === "FuncDecl" && s.typeParams?.length)),
     ...c.specializations(),
   ];
   // Belt-and-braces: a `#T` marker has no lowering, so if one somehow survived
   // specialization it must be REJECTED here, never handed to codegen.
-  mapTypesDeep(program.body, (t) => {
+  mapTypesDeep(checkedBody, (t) => {
     if (hasTypeParam(t)) throw nyi(NYI.GENERIC, `unresolved generic type parameter '${t}' survived monomorphization`);
     return t;
   });
@@ -1079,11 +1104,11 @@ export function check(program: Program, collectBlockers?: FnBlocker[]): CheckedP
   // specializations just spliced in) and BEFORE definite assignment, which is name-based
   // and had to refuse a shadowed binding outright precisely because it could not tell
   // two same-named bindings apart. After this pass it can: they have different names.
-  alphaRenameShadows(program.body);
+  alphaRenameShadows(checkedBody);
   // Definite assignment runs LAST: it reads `Declarator.init`, and `checkStmt` above is
   // what materializes that initializer for the types which admit `undefined`. Running it
   // on the final body also covers every generic specialization just spliced in.
-  checkDefiniteAssignment(program.body);
+  checkDefiniteAssignment(checkedBody);
 
   let globals = new Map<string, Ty>();
   for (const name of moduleScope.hits) {
@@ -1096,7 +1121,7 @@ export function check(program: Program, collectBlockers?: FnBlocker[]): CheckedP
   // table off its OWNER is what makes those visible here for any reason other than bun's
   // aliasing. Codegen resolves every call through this table, so a missing specialization
   // is a call emitted against a signature that is not there.
-  return { program, functions: c.functions, globals };
+  return { program: { ...program, body: checkedBody }, functions: c.functions, globals };
 }
 
 /** Expansion budget — a monomorphizable program needs a handful; only polymorphic
@@ -5123,12 +5148,14 @@ class Checker {
     // different shapes answer `[]`, which is exactly "cannot say" and leaves the binding
     // at today's default. A plain name still matches exactly.
     const byProp = name.startsWith(".");
+    //@@mutable
+    let bodies: Stmt[][] = [];
     for (const s of this.programBody) {
       if (s.kind !== "FuncDecl") continue;
       if (byProp ? !s.name.endsWith(name) : s.name !== name) continue;
       args = [...args, ...uncoveredThrows(s.body, false)];
+      bodies = [...bodies, s.body];
     }
-    if (args.length === 0) return [];
     //@@mutable
     const answer: Ty[] = [];
     for (const a of args) {
@@ -5137,6 +5164,26 @@ class Checker {
       if (answer.length > 0 && t[0]! !== answer[0]!) return []; // this function does not agree with itself
       if (answer.length === 0) answer.push(t[0]!);
     }
+    // TRANSITIVE, and STRICTLY ADDITIVE: consulted only when the function throws nothing
+    // DIRECTLY, so it can turn "cannot say" into an answer and never the reverse. A
+    // dispatcher that throws nothing itself still raises everything its helpers do —
+    // `Checker.checkFunction` is exactly that, and without this the `catch (e)` around it
+    // binds `"string"`, which is the blocker holding checker.ts, codegen.ts and
+    // ownership.ts off IR. The memo doubles as the recursion guard (`raisedTys` is seeded
+    // with `[]` on entry), so a mutual cycle answers "cannot say" and terminates. A callee
+    // this cannot type is SKIPPED, not a veto: if it really raises something else, its
+    // raise and the binding disagree and `scanEscaping` rule 3 refuses it.
+    if (answer.length === 0) {
+      for (const body of bodies) {
+        for (const callee of calleesOf(body)) {
+          const t = this.raisedTypeOf(callee);
+          if (t.length === 0) continue;
+          if (answer.length > 0 && t[0]! !== answer[0]!) return [];
+          if (answer.length === 0) answer.push(t[0]!);
+        }
+      }
+    }
+    if (answer.length === 0) return [];
     this.raisedTys = this.raisedTys.set(name, answer);
     return answer;
   }

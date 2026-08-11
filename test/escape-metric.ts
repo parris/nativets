@@ -283,7 +283,7 @@ export function measureEscapes(entryPath: string): EscapeReport {
   let typed: Program | null = null;
   try {
     typed = linkProgram(readFileSync(entry, "utf8"), entry);
-    try { check(typed, []); } catch { /* expected: aborts after the per-function loop */ }
+    try { check(typed, [], true); } catch { /* expected: aborts after the per-function loop */ }
   } catch { typed = null; }
 
   const seedSet = new Set(seedNames);
