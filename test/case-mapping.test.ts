@@ -24,8 +24,16 @@
  * compare turns mangled bytes into U+FFFD on both sides and reports a match.
  */
 import { describe, it, expect } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
 
 import { ourRun, nodeRun, isRefusal, isUtf8 } from "./fzq-fuzz.ts";
+import { emitIR } from "./harness.ts";
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 /** Run both sides and assert byte-for-byte stdout equality plus equal exit codes. */
 async function expectSameBytes(source: string): Promise<void> {
@@ -220,5 +228,161 @@ describe("case mapping — shapes that break a naive implementation", () => {
       "console.log(big.toLowerCase());",
       "",
     ].join("\n"));
+  });
+});
+
+/*
+ * THE TWO TESTS BELOW EXIST BECAUSE THE ONES ABOVE DID NOT CATCH THESE MUTANTS.
+ *
+ * Seven deliberate defects were spliced into `nt_case_impl` / `nt_case_map` to check the
+ * suite bites. Five died on the sweeps above. Two SURVIVED, and both are worse than the
+ * defect this file was opened for:
+ *
+ *  - sizing the output buffer from the INPUT length (`out_n += len` instead of the mapped
+ *    width). Every length-growing mapping then writes past the allocation — `"İ".repeat(64)
+ *    .toLowerCase()` overruns by 64 bytes. The bytes WRITTEN are still the right answer, so
+ *    stdout matches node exactly and every assertion above passes over a heap overflow.
+ *
+ *  - widening the covered-lead test from `0xC2..0xC5` to `>= 0xC2`, so the first two bytes
+ *    of a 3- or 4-byte sequence get recombined into a bogus code point. Most of the time
+ *    that lands outside the mapped range and the bytes are copied through unchanged, which
+ *    is why `中` and `😀` in the mixed-string test did not notice. `U+4000` does: its lead
+ *    pair recombines to U+0100 `Ā`, which IS mapped, so `"䀀".toLowerCase()` returns
+ *    three bytes that decode to something else entirely.
+ *
+ * A stdout compare can see neither. They need a memory check and a systematic pass-through
+ * sweep respectively.
+ */
+describe("case mapping — the mutants a stdout compare cannot see", () => {
+  /** Build a nativets program under ASan+UBSan and run it (cf. test/asan-instrumentation.test.ts). */
+  function runSanitized(source: string): { status: number | null; stdout: string; stderr: string } {
+    const dir = mkdtempSync(join(tmpdir(), "nativets-case-asan-"));
+    try {
+      const llPath = join(dir, "module.ll");
+      writeFileSync(llPath, emitIR(source));
+      const bin = join(dir, "prog");
+      const built = spawnSync("clang", [
+        "-O1", "-g", "-fsanitize=address,undefined", "-fno-sanitize-recover=all",
+        llPath, join(ROOT, "runtime/runtime.c"), "-lm", "-o", bin,
+      ], { encoding: "utf8" });
+      expect(built.stderr.includes("error:")).toBe(false);
+      expect(built.status).toBe(0);
+      const run = spawnSync(bin, [], {
+        encoding: "utf8", timeout: 60_000, killSignal: "SIGKILL",
+        env: { ...process.env, ASAN_OPTIONS: "detect_leaks=0" },
+      });
+      return { status: run.status, stdout: run.stdout ?? "", stderr: run.stderr ?? "" };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  /*
+   * `runtime/*.c` is compiled FROM SOURCE here, so clang stamps `sanitize_address` on it
+   * and the store inside `nt_case_impl` is instrumented — no `NATIVETS_ASAN` needed, since
+   * the write under test is the runtime's own and not the generated code's.
+   *
+   * Every length-CHANGING mapping is exercised, in bulk, because a one-byte overrun of a
+   * malloc'd block is invisible without a redzone: the answer printed is correct.
+   */
+  it("writes the mapped result INSIDE its allocation (ASan, the growth cases)", () => {
+    const r = runSanitized([
+      'console.log("\\u0130".repeat(64).toLowerCase());', // İ -> i+U+0307, 2 bytes -> 3, the worst ratio
+      'console.log("\\u0149".repeat(64).toUpperCase());', // ŉ -> ʼN,       2 bytes -> 3
+      'console.log("\\u00df".repeat(64).toUpperCase());', // ß -> SS
+      'console.log("\\u0131".repeat(64).toUpperCase());', // ı -> I,        2 bytes -> 1 (shrinks)
+      'console.log("\\u017f".repeat(64).toUpperCase());', // ſ -> S,        2 bytes -> 1
+      'console.log("a\\u0130b\\u00dfc\\u0149".repeat(300).toLowerCase().length);',
+      'console.log("a\\u0130b\\u00dfc\\u0149".repeat(300).toUpperCase().length);',
+      "",
+    ].join("\n"));
+    expect(r.stderr).not.toContain("AddressSanitizer");
+    expect(r.stderr).not.toContain("runtime error");
+    expect(r.status).toBe(0);
+  });
+
+  /*
+   * Every code point from U+0180 to U+FFFF is UNCOVERED (docs/divergences.md §A.4) and must
+   * therefore come back BYTE-IDENTICAL from both methods. Comparing against ourselves
+   * rather than node is the point: node maps ~2600 of these, so this is the divergence's
+   * own regression test, and it is also the only shape that catches a walker which
+   * mis-frames a lead byte — which needs a code point whose bytes RECOMBINE into the
+   * covered range, not merely a multi-byte one.
+   *
+   * Surrogates are skipped: they are not scalar values and cannot appear in a literal.
+   */
+  it("returns every uncovered code point U+0180-U+FFFF byte-identical", async () => {
+    const lines: string[] = [];
+    let chunk: string[] = [];
+    let n = 0;
+    const flush = (): void => {
+      if (chunk.length === 0) return;
+      const id = `c${n++}`;
+      lines.push(`const ${id} = "${chunk.join("")}";`);
+      lines.push(`console.log(${id}.toUpperCase() === ${id});`);
+      lines.push(`console.log(${id}.toLowerCase() === ${id});`);
+      chunk = [];
+    };
+    for (let cp = 0x180; cp <= 0xffff; cp++) {
+      if (cp >= 0xd800 && cp <= 0xdfff) continue;
+      chunk.push(esc(cp));
+      if (chunk.length === 256) flush();
+    }
+    flush();
+    const ours = await ourRun(lines.join("\n") + "\n");
+    if (isRefusal(ours)) throw new Error(`nativets refused:\n${ours.refused}`);
+    expect(ours.exitCode).toBe(0);
+    // Assert the COUNT as well as the content — a program that printed nothing at all
+    // would otherwise satisfy a "no false" check vacuously.
+    const out = ours.stdout.toString("utf8").split("\n").filter((l) => l !== "");
+    // Assert the COUNTS, not just the absence of a `false`: a program that printed nothing
+    // would satisfy an all-true check vacuously.
+    expect({ chunks: n, lines: out.length }).toEqual({ chunks: chunkCount(), lines: 2 * chunkCount() });
+    // Report WHICH chunk broke, not merely that one did — 256 code points is a small
+    // enough window to read off the range by hand.
+    const bad = out.indexOf("false");
+    // Chunk k holds the 256 code points at ordinal k*256 of the surrogate-SKIPPING
+    // enumeration, so the start below is exact up to U+D800 and shifts by 2048 after it.
+    const where = bad < 0 ? "none" :
+      `chunk ${bad >> 1} of ${chunkCount()} (${bad % 2 === 0 ? "toUpperCase" : "toLowerCase"}), ` +
+      `starting near U+${(0x180 + (bad >> 1) * 256).toString(16)}`;
+    expect({ firstMismatch: where }).toEqual({ firstMismatch: "none" });
+  });
+
+  /** U+0180..U+FFFF minus the 2048 surrogates, in chunks of 256 — 247 chunks, 63104 code points. */
+  function chunkCount(): number {
+    return Math.ceil((0xffff - 0x180 + 1 - 2048) / 256);
+  }
+
+  /*
+   * ILL-FORMED UTF-8, and it is REACHABLE — this is §A.2 handing a problem to this file.
+   * Because `.slice` cuts BYTES, `"é".slice(0, 1)` is an ordinary expression that yields
+   * the LEAD BYTE of a two-byte character on its own. Concatenate an `A` after it and the
+   * string is `C3 41`: a covered lead followed by a byte that is not a continuation.
+   *
+   * A walker that trusts the lead byte alone decodes that pair as U+00C1 `Á`, lowercases it
+   * to U+00E1, and writes `C3 A1` — the `A` is EATEN and replaced. Same byte count, still
+   * exit 0. So the check that the second byte really is a continuation is load-bearing on
+   * input a program can actually produce, and the only defensible answer is to touch
+   * neither byte's identity: copy the stray lead through, lower the `A` as the ASCII it is.
+   *
+   * node is not the oracle here — its `String` cannot hold a lone surrogate-free ill-formed
+   * byte at all, so there is no comparison to make; the assertion is on our own bytes.
+   */
+  it("never re-frames a stray lead byte, and still maps the ASCII after it", async () => {
+    const ours = await ourRun([
+      'const half = "\\u00e9".slice(0, 1);', // the lead byte of é, alone — ill-formed
+      'const s = half + "A";',
+      "console.log(s.toLowerCase());",
+      'const t = half + "a";',
+      "console.log(t.toUpperCase());",
+      "",
+    ].join("\n"));
+    if (isRefusal(ours)) throw new Error(`nativets refused:\n${ours.refused}`);
+    expect(ours.exitCode).toBe(0);
+    // C3 61 0A  C3 41 0A — the stray lead survives untouched, the ASCII beside it maps.
+    expect([...ours.stdout]).toEqual([0xc3, 0x61, 0x0a, 0xc3, 0x41, 0x0a]);
+    // ...and it is deliberately NOT valid UTF-8: we do not invent a replacement character.
+    expect(isUtf8(ours.stdout)).toBe(false);
   });
 });
