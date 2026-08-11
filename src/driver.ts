@@ -514,7 +514,12 @@ function writeIR(source: string, entryPath?: string): { dir: string; ll: string;
   if (guiFlags) {
     const gui = join(dir, "nt_gui.c");
     writeFileSync(gui, guiSource);
-    extra.push(gui, ...guiFlags);
+    // `push(gui, ...guiFlags)` spelled as two appends. A spread into a variadic call is
+    // NT1006 (`spread in calls is not supported yet`), and this file has to stay inside
+    // the subset nativets compiles ITSELF in — the same reason `materializeTextImports`
+    // in src/modules.ts uses `.map` rather than a `push` loop. Identical under bun.
+    extra.push(gui);
+    for (const f of guiFlags) extra.push(f);
   }
   // Link the v0 actor runtime ONLY when the program uses actors (codegen emits the
   // nt_sched_init prologue exactly then). It relies on ucontext (makecontext/
@@ -522,9 +527,14 @@ function writeIR(source: string, entryPath?: string): { dir: string; ll: string;
   // so pulling it into every non-actor binary would break the Android cross-build.
   let actor: string | null = null;
   if (ir.includes("call void @nt_sched_init()")) {
-    actor = join(dir, "nt_actor.c");
-    writeFileSync(actor, actorSource);
+    // Written through a `string` local, not through the `string | null` binding. tsc
+    // narrows `actor` to `string` after the assignment; nativets' checker does not carry
+    // narrowing across an assignment, so `writeFileSync(actor, …)` was `expects string,
+    // got ?Nstring`. The local says the same thing to both.
+    const actorPath = join(dir, "nt_actor.c");
+    writeFileSync(actorPath, actorSource);
     writeFileSync(join(dir, "nt_actor.h"), actorHeader); // its header (quote-included)
+    actor = actorPath;
   }
   return { dir, ll, rt, actor, extra };
 }
