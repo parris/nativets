@@ -319,13 +319,55 @@ console.log(readIt(), shared.a);
   });
 
   /* A function that declares its OWN binding of the same name owns it, and must keep the
-   * right to hand it out — the refusal is about the module's binding, not the spelling. */
+   * right to hand it out — the refusal is about the module's binding, not the spelling.
+   *
+   * `reader` is load-bearing and the test was VACUOUS without it: `checked.globals` holds
+   * only the module bindings some function body actually READS, so with `get` alone the
+   * global set is empty, the rule never runs, and deleting the shadow subtraction changes
+   * nothing. `reader` puts `shared` in that table, which is what makes `get`'s local
+   * collide with it. */
   test("a function's own binding that SHADOWS a global is still its own", async () => {
     await matchesNode(`
 const shared = { a: 1 };
+function reader(): number { return shared.a; }
 function get(): { a: number } { const shared = { a: 2 }; return shared; }
-console.log(get().a);
+console.log(reader(), get().a);
 `);
+  });
+
+  /* The same collision one level down, where `alphaRenameShadows` — not the subtraction —
+   * is what keeps the two apart: a nested-block `const` of a module name is renamed to
+   * `shared.N`, so it can never be mistaken for the global. */
+  test("a shadow in a nested BLOCK is its own binding too", async () => {
+    await matchesNode(`
+const shared = { a: 1 };
+function reader(): number { return shared.a; }
+function get(c: boolean): number {
+  if (c) { const shared = { a: 2 }; return shared.a; }
+  return 0;
+}
+console.log(reader(), get(true), get(false));
+`);
+  });
+
+  /* A PARAMETER named like a global is the other pinned scope, and it is a by-borrow
+   * parameter — so it must land in the parameter arm of NT1604, not the module arm. */
+  test("a parameter that shadows a global is a parameter", async () => {
+    await matchesNode(`
+const shared = { a: 1 };
+function reader(): number { return shared.a; }
+function useIt(shared: { a: number }): number { return shared.a; }
+console.log(reader(), useIt({ a: 7 }));
+`);
+    const e = thrown(`
+const shared = { a: 1 };
+function reader(): number { return shared.a; }
+function steal(shared: { a: number }): { a: number } { return shared; }
+console.log(reader(), steal({ a: 7 }).a);
+`);
+    expect(e?.diag.code).toBe("NT1604");
+    expect(e?.diag.message).toContain("it is borrowed");
+    expect(e?.diag.message).not.toContain("module-level binding");
   });
 
   /* Every rewrite the NT1604 hint suggests, compiled against node in one program. A hint
