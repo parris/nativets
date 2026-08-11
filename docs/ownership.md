@@ -137,10 +137,10 @@ the index are compile-time constants the program is rejected outright (**NT2002*
 See `docs/divergences.md` and `test/panic.test.ts`.
 
 Indices the **programmer wrote** panic, and so do **the array HOFs** — `.map`/`.filter`/
-`.forEach`/`.flatMap`/`.reduce` read through `nt_arr_hof_at`, which panics rather than
-returning 0. Genuinely in-bounds compiler-generated reads (`JSON.stringify`, destructuring,
-spread-call expansion) keep reading through the internal `nt_arr_get`, so nothing pays for a
-second check.
+`.forEach`/`.flatMap`/`.reduce` and `.some`/`.every`/`.find`/`.findIndex`/`.findLast`/
+`.findLastIndex` all read through `nt_arr_hof_at`, which panics rather than returning 0.
+Genuinely in-bounds compiler-generated reads (`JSON.stringify`, destructuring, spread-call
+expansion) keep reading through the internal `nt_arr_get`, so nothing pays for a second check.
 
 The HOFs used to be in that second list, and it was **wrong**: a HOF's loop bound is the
 receiver's length read once, so a callback that shrinks the receiver walks off the end and used

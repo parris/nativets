@@ -238,9 +238,52 @@ the prologue, they charged every in-bounds read for a frame it never used (+4.4%
 separate cold function. (Not the diagnostic arguments — a probe taking the same two arguments as
 `nt_arr_get` measured identically to the four-argument form.)
 
+**The SEARCH HOFs are in this too, and node splits them in two.** `.some`/`.every`/`.find`/
+`.findIndex`/`.findLast`/`.findLastIndex` do not share the loop above — `genSearchHof` builds its
+own, because the `Last` pair counts *down* — so they took their own snapshot and had their own
+return-0 read. It bites harder there, because the phantom reaches a **predicate** rather than an
+output array, and a predicate that tests for `0` matches an element that does not exist:
+
+```ts
+//@@mutable
+const a = [1, 2, 3, 4];
+a.some((x, i) => { if (i === 0) { a.pop(); a.pop(); } return x === 0; });
+// node: false      nativets (before): true      both exit 0   <- a FLIPPED BOOLEAN
+```
+
+Measuring node to write those tests turned up a distinction worth recording, because the two
+halves are not interchangeable and it is the ES spec that separates them:
+
+| method | absent index | visited, from a 4-element snapshot |
+|---|---|---|
+| `.some`, `.every` | guarded by `HasProperty` — **skipped** | `[0,1]` |
+| `.map`, `.filter`, `.forEach`, `.flatMap`, `.reduce` | guarded by `HasProperty` — **skipped** | `[0,1]` |
+| `.find`, `.findIndex` | plain `Get` — callback gets **`undefined`** | `[0,1,2,3]` |
+| `.findLast`, `.findLastIndex` | plain `Get` — callback gets **`undefined`** | `[3,2,1,0]` |
+
+Neither half is reproducible — one needs "skip", the other needs `undefined` — so all of them
+panic. (The trigger index differs only because the `Last` pair walks backwards: the shrink has to
+land on the first element that direction visits.)
+
+**One case in that family is NOT a panic, because node can be matched exactly.** `.find` and
+`.findLast` return an *element*, and it used to be produced by a **second** `src[hit]` read after
+the loop. The matching callback can shrink the array after being handed its element, so `hit`
+then points past the new end and that re-read answered 0:
+
+```ts
+a.find((x, i) => { const m = i === 3; if (m) { a.pop(); a.pop(); } return m; });
+// node: 4      nativets (before): 0      both exit 0
+```
+
+node returns `kValue`, which it read *before* the shrink — so unlike the loop read, the right
+answer is in hand and refusing would be gratuitous. The match path now keeps the slot it already
+loaded. Exit 0, node's answer, one store on the match path, and only `.find`/`.findLast` emit it
+so the other four keep byte-identical IR. Where node's answer is reachable we take it; the panic
+is only for where it is not.
+
 Covered by `test/hof-resize.test.ts`, which asserts node's real answer for every member of the
-family before asserting our panic, keeps the growth cases as a green control, and compiles the
-hint's advice against node.
+family before asserting our panic, keeps the growth cases and a read-only callback as green
+controls, and compiles the hint's advice against node.
 
 #### STILL OPEN — `.with(-1, v)` panics on a program node runs correctly
 
