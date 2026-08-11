@@ -1633,6 +1633,31 @@ handle to become a box (one indirection, refcounted, every alias observing the w
 runtime-representation change, i.e. a stage of its own, and it is the recommended follow-on.
 Until it exists, the refusal is the honest answer.
 
+**`src/` IS SUBJECT TO THIS DIVERGENCE, AND IS LINTED FOR IT** (`test/single-owner.test.ts`).
+Stage 0 runs the compiler under bun, where `.set`/`.add` mutate — so every instrument in the
+tree is green *because* of the very semantics `src/` must not depend on, and no `NT` code can
+see it. The checker structurally cannot: `NT1606`'s rule is "the result is **discarded**",
+whereas the shape that bites keeps the result and assigns it, and only the **aliasing**
+question decides whether that is wrong. The two are orthogonal, and chasing aliases is the
+unsound direction this section already refuses to take for user programs.
+
+`check` had exactly this bug: it built the signature table into a local, handed the local to
+`new Checker(functions, …)`, and then went on rebinding it. Under bun both names stayed one
+object; under the semantics this compiler implements, `Checker.functions` would have been
+**empty for the whole check**, so no call in any program would resolve. Reduced, and measured
+both ways at exit 0:
+
+```ts
+let m = new Map<string, number>(); const c = new Table(m);
+m = m.set("a", 1); m = m.set("b", 2);
+console.log(m.size, c.size());     // node: "2 2"   nativets: "2 0"
+```
+
+The rule for `src/` is **single owner**: fill a collection *before* sharing it, or let exactly
+one holder own it and write through that holder (`c.functions = c.functions.set(…)`, which
+needs the owner to be `@@mutable`). Returning the new collection and rebinding at the call
+site (`out = f(…, out)`) is the other correct spelling. The lint reports the remaining sites.
+
 #### `.delete` consumed as a BOOLEAN is REFUSED (`NT1606`) — it used to invert control flow
 
 Item (2) at the top of this section — "`.delete` returns a new collection, where node returns
