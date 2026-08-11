@@ -176,6 +176,36 @@ describe("fuzz findings — string → number conversions", () => {
   });
 });
 
+describe("fuzz findings — the lexer's escape table", () => {
+  /*
+   * `\b` (U+0008), `\f` (U+000C) and `\v` (U+000B) are SingleEscapeCharacters in
+   * ECMAScript, and `escapeChar` in `src/lexer.ts` does not list them. They therefore reach
+   * its `default: return e` — the correct rule for an UNKNOWN escape (`\q` is `q`) applied to
+   * three escapes that are not unknown — so `"\b"` is the letter `b`.
+   *
+   * This is the worst kind of quiet: the wrong string is the same LENGTH as the right one
+   * (one character either way), so a `.length` assertion cannot see it, and it is well-formed
+   * ASCII, so nothing downstream complains. Both string and template literals are affected —
+   * one decoder serves both, which is why the miss is symmetric.
+   *
+   * Everything else in the escape space is correct, checked in the same sweep:
+   * `\n \t \r \\ \' \" \` \0`, `\xNN`, `\uNNNN`, `\u{NNNNN}`, an unknown escape, and the
+   * octal refusal (NT0001).
+   */
+  it.failing("`\\b`, `\\f` and `\\v` decode to U+0008 / U+000C / U+000B", async () => {
+    await expectSameBytes([
+      'console.log("\\b".charCodeAt(0));',  // node 8,  ours 98  ("b")
+      'console.log("\\f".charCodeAt(0));',  // node 12, ours 102 ("f")
+      'console.log("\\v".charCodeAt(0));',  // node 11, ours 118 ("v")
+      'console.log(JSON.stringify("\\b"));', // node "\b", ours "b"
+      'console.log(`x\\by`.charCodeAt(1));', // node 8, ours 98 — templates too
+      'console.log("\\n".charCodeAt(0));',  // node 10, ours 10 — correct
+      'console.log("\\q".charCodeAt(0));',  // node 113, ours 113 — correct (unknown escape)
+      "",
+    ].join("\n"));
+  });
+});
+
 describe("fuzz findings — object literals", () => {
   /*
    * In node `__proto__:` in an object LITERAL is the prototype setter, not a data property:
