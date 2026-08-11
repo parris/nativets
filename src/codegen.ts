@@ -290,7 +290,7 @@ function scanEscaping(program: Program, usesActors: boolean): Set<string> {
 
   // ---- judge. `dead[i]` is "seed function i is NOT provably escaping".
   //@@mutable
-  const dead: boolean[] = names.map(() => false);
+  const dead: boolean[] = names.map((_n) => false);
   for (let i = 0; i < names.length; i++) {
     const name = names[i]!;
     // A method is a top-level `Class.m` whose call sites name only `m`, so it answers to
@@ -2040,7 +2040,11 @@ class FnGen {
       case "SwitchStmt": {
         const disc = this.genExpr(s.discriminant);
         const endLbl = this.label("endsw");
-        const bodyLbls = s.cases.map(() => this.label("case"));
+        // `_c` is spelled rather than omitted: a callback's parameters bind POSITIONALLY,
+        // so a 0-parameter `.map` callback is an arity mismatch the checker refuses — one
+        // of codegen.ts's self-host blockers. One label per case, none of them derived
+        // from the case itself.
+        const bodyLbls = s.cases.map((_c) => this.label("case"));
         const defaultIdx = s.cases.findIndex((c) => c.test === null);
         // A `switch` is a `break` target but NOT a `continue` target: a `continue` inside
         // one belongs to the enclosing loop, so its label AND its unwind depth are both
