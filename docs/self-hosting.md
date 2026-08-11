@@ -5345,6 +5345,33 @@ Already measured **net negative** (179 -> 182): the tag is NOMINAL, so tagged re
 accepting structural literals, and `accessPath` declines a `@@mutable` receiver so
 optional-field narrowing stops. Unchanged.
 
+### Measured and REJECTED: transitive raise inference (2026-08-11)
+
+`raisedTypeOf` collects a function's own uncovered throws and does not follow calls. Making
+it transitive — so a dispatcher that throws nothing directly still reports what its helpers
+raise — was implemented and measured, and it does **not** pay:
+
+    93 -> 94 blockers
+
+- It cleared `Parser.hoistTypeDecls`'s NT2001 and the function immediately hit **NT1606**
+  (`deferred.push`) instead. A blocker that changes bucket is not progress.
+- It **broke** `Parser.resolveCycle`: with the binding typed `NTError` instead of `string`,
+  the defensive `String((e as { message?: string }).message ?? e)` at `src/parser.ts:837`
+  became *"'{message:?Ustring}' is not a valid assertion … the field 'message' is at a
+  different slot or type"*. **A more precise catch binding can invalidate an `as` assertion
+  that only type-checked because the binding was imprecise** — worth remembering before any
+  future precision work on binding types.
+
+The first attempt was worse still (93 -> 94 by a different route): letting callees vote
+*alongside* direct throws let one disagreeing callee discard an answer the direct throws had
+already established. Restricting it to "consult callees only when there are no direct
+throws" made it strictly additive and it still did not pay.
+
+Nothing is miscompiled either way — a raise whose shape differs from the binding is refused
+by `scanEscaping` rule 3, never stored — so both variants bought a refusal and cost an
+inference. Reverted; the two changes that DID pay (method-call callees, and typing
+`throw helper(…)` from the callee's declared return type) are in `e2a7668`.
+
 ### What that leaves
 
 Roughly a dozen genuinely independent blockers (a `DataView`, a few narrowing gaps, a
