@@ -260,6 +260,92 @@ function merge(a: State, b: State): State {
   }
   return out;
 }
+/**
+ * DOES EVERY PATH THROUGH THIS STATEMENT LIST LEAVE THE FRAME?
+ *
+ * The fall-through join after an `if`/`switch` is a program point an arm that `return`s
+ * or `throw`s never reaches, so merging that arm's moves into it poisoned names for code
+ * the move cannot precede:
+ *
+ *     const a: number[] = [1, 2, 3];
+ *     if (c) return a;            // moves `a` — and LEAVES
+ *     return [a.length];          // was NT1601; node prints 3
+ *
+ * Conservative in the safe direction: `false` (i.e. "control can fall out of here, so
+ * merge") unless divergence is proved. A LOOP body never counts however it ends — the
+ * loop may run zero times. `if` counts only when BOTH arms diverge.
+ *
+ * The predicate is deliberately about leaving THE FRAME, not about leaving the block:
+ * see `hasJump` for the other half, and `Analyzer.escapes` for the `try` guard. Widening
+ * it past that is how a safe refusal becomes a silent use-after-free.
+ *
+ * Spelled as a `switch` per statement rather than a chain of `&&`ed `if`s, the same shape
+ * as `hasJump` below, so that `src/` stays inside the subset it compiles: a `kind ===`
+ * test and a `!== null` test on the SAME line only narrow one at a time here, so the
+ * `&&` spelling read `alternate` as still-nullable and was NT2001 ("narrow it first") —
+ * a self-hosting blocker this lane would have added with its own fix.
+ */
+function leavesFrame(list: Stmt[]): boolean {
+  for (const s of list) {
+    switch (s.kind) {
+      case "ReturnStmt": case "ThrowStmt": return true;
+      case "BlockStmt": if (leavesFrame(s.body)) return true; break;
+      case "MultiStmt": if (leavesFrame(s.stmts)) return true; break;
+      case "IfStmt": {
+        const alt = s.alternate;
+        if (alt !== null && leavesFrame(s.consequent) && leavesFrame(alt)) return true;
+        break;
+      }
+      default: break;
+    }
+  }
+  return false;
+}
+
+/**
+ * Does this list contain a `break` or a `continue` ANYWHERE?
+ *
+ * The disqualifier for `leavesFrame`. A list can hold BOTH a `return` and a `break`:
+ *
+ *     for (…) {
+ *       if (c) { const b: number[] = a; if (d) break; return 1; }
+ *     }
+ *     use(a);                     // reached by the BREAK, with `a` moved
+ *
+ * The `return` makes the arm look diverging, but the `break` path leaves the arm WITHOUT
+ * leaving the frame and lands on the loop-exit join — which is fed from exactly the state
+ * we would have discarded. Dropping it there would accept a real use-after-move, so an
+ * arm holding any jump keeps today's unconditional merge.
+ *
+ * Over-approximates on purpose: a `break` bound to a loop or `switch` NESTED INSIDE the
+ * arm cannot escape it, and is counted anyway. That costs a conservative refusal, which
+ * is the direction this pass is allowed to be wrong in. There are no labeled statements
+ * in the subset (see ast.ts), so a jump always targets the innermost construct.
+ *
+ * Nested `FuncDecl`s and arrow bodies are not walked — they are their own frames, and a
+ * jump inside one cannot name a loop out here.
+ */
+function hasJump(list: Stmt[]): boolean {
+  for (const s of list) {
+    switch (s.kind) {
+      case "BreakStmt": case "ContinueStmt": return true;
+      case "BlockStmt": case "WhileStmt": case "DoWhileStmt": case "ForStmt": case "ForOfStmt": case "ForInStmt":
+        if (hasJump(s.body)) return true;
+        break;
+      case "MultiStmt": if (hasJump(s.stmts)) return true; break;
+      case "IfStmt": if (hasJump(s.consequent) || (s.alternate !== null && hasJump(s.alternate))) return true; break;
+      case "SwitchStmt": for (const c of s.cases) if (hasJump(c.body)) return true; break;
+      case "TryStmt":
+        if (hasJump(s.block)) return true;
+        if (s.handler !== null && hasJump(s.handler)) return true;
+        if (s.finalizer !== null && hasJump(s.finalizer)) return true;
+        break;
+      default: break;
+    }
+  }
+  return false;
+}
+
 function sameMoves(a: State, b: State): boolean {
   const keys = new Set([...a.keys(), ...b.keys()]);
   for (const k of keys) if (!!a.get(k)?.moved !== !!b.get(k)?.moved) return false;
@@ -632,6 +718,50 @@ class Analyzer {
     return true;
   }
 
+  /**
+   * Lexical nesting inside a `try` — the guard that keeps `escapes` honest.
+   *
+   * A `return` inside a `try` runs the `finally` on its way out, and a `throw` inside one
+   * runs the `catch` AND the `finally`. Those are program points REACHED FROM the
+   * diverging branch, and they read the very state `escapes` would discard:
+   *
+   *     try { if (c) { const b: number[] = a; return b.length; } }
+   *     finally { console.log(a.length); }        // must stay NT1601
+   *
+   * The `catch`/`finally` entry state is the try block's fall-through state (see the
+   * `TryStmt` case), so there is nowhere else for a diverging arm's moves to be recorded.
+   * Rather than build a second, exceptional dataflow for it, the relaxation is simply OFF
+   * inside a `try` — the analysis there stays bit-for-bit what it is today, which is
+   * conservative and already proven. It costs the `try`-local shape of B, and it is not
+   * needed for A: A's fix is the `throw` becoming CONSUMING, and the drop flag
+   * (`condDrops`/`nullOnMove`) is what makes the maybe-moved local safe to still list.
+   */
+  private tryDepth = 0;
+
+  /**
+   * Is this arm off the path to the fall-through join — may its moves be dropped?
+   *
+   * All three conditions are load-bearing; see `leavesFrame`, `hasJump` and `tryDepth`.
+   */
+  private escapes(list: Stmt[]): boolean {
+    return this.tryDepth === 0 && !hasJump(list) && leavesFrame(list);
+  }
+
+  /**
+   * The fall-through join of an `if`'s two arms. An arm that leaves the frame contributes
+   * NOTHING: this point is not on any path through it. If both leave, the join itself is
+   * unreachable and the state from BEFORE the `if` stands — the most permissive answer,
+   * and the one that keeps `if (c) return a; else return a;` from reporting a re-move of
+   * a value each arm moves exactly once.
+   */
+  private joinArms(entry: State, s1: State, l1: Stmt[], s2: State, l2: Stmt[]): State {
+    const e1 = this.escapes(l1), e2 = this.escapes(l2);
+    if (e1 && e2) return entry;
+    if (e1) return s2;
+    if (e2) return s1;
+    return merge(s1, s2);
+  }
+
   /** Names that need the null-on-move drop flag, and the move sites to null at. */
   condDrops = new Set<string>();
   moveSites = new Map<string, Set<Expr>>();
@@ -816,7 +946,7 @@ class Analyzer {
         this.scoped(s.consequent, s1);
         const s2 = clone(state);
         if (s.alternate) this.scoped(s.alternate, s2);
-        assignInto(state, merge(s1, s2));
+        assignInto(state, this.joinArms(clone(state), s1, s.consequent, s2, s.alternate ?? []));
         return;
       }
       case "WhileStmt":
@@ -857,8 +987,12 @@ class Analyzer {
       }
       case "SwitchStmt": {
         this.expr(s.discriminant, state, false);
+        // A case whose body leaves the frame is not on any path to the statement AFTER the
+        // switch, so — exactly as for an `if` arm — its moves are not merged in. A case
+        // ending in `break` is NOT one of those: `hasJump` disqualifies it, and its state
+        // must reach this join because that is where the break lands.
         const merged = s.cases.map((c) => { const cs = clone(state); this.scoped(c.body, cs); return cs; });
-        for (const m of merged) assignInto(state, merge(state, m));
+        for (let i = 0; i < merged.length; i++) if (!this.escapes(s.cases[i]!.body)) assignInto(state, merge(state, merged[i]!));
         return;
       }
       case "ForInStmt":
@@ -868,29 +1002,48 @@ class Analyzer {
       case "BlockStmt": this.scoped(s.body, state); return;
       case "MultiStmt": this.seq(s.stmts, state); return; // scope-less group: its decls belong to the enclosing block
       case "ThrowStmt": {
-        this.expr(s.argument, state, false);
+        // THE RAISE IS A MOVE, and it is now spelled as one.
+        //
+        // Both lowerings TAKE the pointer: a cross-frame raise hands it to
+        // `nt_exc_raise_obj`, whose slot owns it until `nt_exc_take_object` gives it to the
+        // catch binding; an IN-FRAME throw stores it straight into the catch binding's
+        // slot and branches (codegen's `ThrowStmt` case). ownership.ts makes that binding
+        // an OWNER either way (see `TryStmt` below) — so the thrower must stop being one.
+        //
+        // It used to be spelled as SUBTRACTION from the drop list below instead, on the
+        // grounds that marking it moved would make `if (c) throw e;` leave `e` maybe-moved
+        // for the code after the `if` — an NT1601 on a program node accepts. That was a
+        // real objection, and it is what `escapes` now answers: a branch that throws does
+        // not merge its moves into the join, so `if (c) { throw err; } use(err);` stays
+        // legal with the move recorded. What subtraction could NOT do was cover the
+        // IN-FRAME throw of a local declared OUTSIDE the `try`, because the double owner
+        // there is not in this list at all — it is the catch binding:
+        //
+        //     const err = new E("boom");
+        //     try { if (n > 0) throw err; return 1; }
+        //     catch (e) { return e.message.length * 19; }   // freed `err` AND `e`
+        //
+        // node prints 76; we exited 255 with empty stdout and no diagnostic. As a MOVE it
+        // is a `condDrops` name, so `nullOnMove` nulls `err`'s slot at the raise and the
+        // handler's drop of it is the no-op `nt_obj_free(NULL)` — one owner, one free.
+        // (Inside a `try`, `escapes` is off by design, so the merge keeps `err`
+        // maybe-moved, which is exactly what asks for the drop flag.)
+        this.expr(s.argument, state, true);
         // The EXCEPTIONAL exit's drop set, and it is the same one `ReturnStmt` takes
         // above for the same reason: a throw that propagates out of its frame leaves by
         // a `ret`, so it must free exactly what a `return` written here would free.
         // Computed unconditionally — whether the throw actually propagates is codegen's
         // question (`scanEscaping`), and a throw that branches to a local catch simply
-        // never reads this list.
-        //
-        // …EXCEPT THE THROWN VALUE ITSELF, WHICH IS MOVED. This used to free it, on the
-        // rationale that `nt_obj_free` is shallow so the message string inside survived to
-        // reach `nt_exc_message`. THE PAYLOAD IS NOW THE OBJECT (`nt_exc_raise_obj`), not a
-        // string copied out of it, so that rationale is inverted: the raise TAKES the
-        // pointer, the slot is its one owner until a `catch` takes it back
-        // (`nt_exc_take_object`), and freeing it here would hand the handler a dangling
-        // block. Subtracting the name is the MOVE, and it is done by subtraction rather
-        // than by passing `true` to `expr` above deliberately: marking it moved would make
-        // `if (c) throw e;` leave `e` maybe-moved for the code after the `if`, which is a
-        // NT1601 on a program node accepts. Nothing else observes this list.
-        const moved = s.argument.kind === "Identifier" ? s.argument.name : "";
-        s.drops = this.ownedInScope(state).filter((n) => n !== moved);
+        // never reads this list. The thrown name is excluded by `droppable` now that it is
+        // moved-on-every-path here, so no filter is needed.
+        s.drops = this.ownedInScope(state);
         return;
       }
       case "TryStmt": {
+        // The whole statement, handler and finalizer included, is a no-relaxation region
+        // (see `tryDepth`): a `return` or `throw` anywhere in it reaches a program point
+        // that reads this state, and a nested `try` inside the handler is no different.
+        this.tryDepth++;
         this.scoped(s.block, state);
         // THE CATCH BINDING IS AN OWNER. `throw new Error(m)` stores a temporary with no
         // other owner into it and branches, and a cross-frame raise reconstructs a FRESH
@@ -907,6 +1060,7 @@ class Analyzer {
         for (const n of caught) state.set(n, { moved: false, must: false });
         if (s.handler) this.scoped(s.handler, state, caught);
         if (s.finalizer) this.scoped(s.finalizer, state);
+        this.tryDepth--;
         return;
       }
       // `BlockDrops` is this pass's OWN output. A loop body is walked up to five times
