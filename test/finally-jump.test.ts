@@ -415,6 +415,74 @@ console.log(f());`)).toBe("inner 0\nouter 0\ninner 1\nouter 1\n7\n");
   });
 });
 
+/*
+ * ============================================================================
+ * A SECOND PRE-EXISTING BUG, MEASURED AND LEFT OPEN — `return` THROUGH A
+ * `finally` FREES NOTHING
+ * ============================================================================
+ *
+ * The ordinary `return` path is `coerce` -> `emitDrops(s.drops)` -> `ret`. The
+ * finally path is `store into retSlot` -> `store mode 1` -> `br finally`, and it emits
+ * NO drops at all — not at the return, and not in the dispatch that does the `ret`. So
+ * every owned local of the frame leaks, once per call, linearly.
+ *
+ *   200 calls -> __arrLive() 200      2000 calls -> 2000
+ *
+ * Isolated against two controls in the same program: the same function with no `try`
+ * leaks 0, and with a `catch` and no `finally` leaks 0. It is the `finally` return path
+ * specifically.
+ *
+ * WHY THIS LANE DID NOT FIX IT, deliberately. The drops cannot move to the return site —
+ * the finalizer can READ those locals (`try { return v; } finally { console.log(xs[0]); }`),
+ * so freeing before it runs turns a leak into a use-after-free, which is strictly worse.
+ * They belong in the block that does the `ret`, after every finalizer has run, and that
+ * block is shared by every `return` in the `try` while each has its OWN `s.drops` and its
+ * own string-transfer decision. Getting that wrong is a double free. It also has to carry
+ * across the forwarding chain added above, and `emitStrDrops` reads `this.strLocals` as it
+ * stands WHEN THE BLOCK IS EMITTED, which is later than the return site — a set that has
+ * since grown would release a local that is not initialised yet.
+ *
+ * That is a stage, not a line, and it touches the return-value lifetime accounting a
+ * different lane holds. So it is measured here instead of guessed at.
+ *
+ * THIS TEST ASSERTS THE BUG. When it starts failing, the leak has been fixed: change the
+ * two numbers to 0 and delete this header.
+ */
+describe("OPEN BUG: return through a finally leaks the frame's locals", () => {
+  test("it leaks one array per call, and the growth is linear", async () => {
+    const { small, large, stdout } = await liveAtTwoScales((n) => `function viaFinally(k: number): number {
+  const xs: number[] = [1, 2, 3];
+  try { return xs.length + k; } finally { }
+}
+let acc = 0;
+for (let i = 0; i < ${n}; i++) { acc = acc + viaFinally(i); }
+console.log(acc > 0);`);
+    expect(stdout).toBe("true");
+    expect(small).toBe(200); // <- 0 once fixed
+    expect(large).toBe(2000); // <- 0 once fixed
+  });
+
+  // The controls that isolate it to the `finally` return path, in one program so the
+  // three counts are comparable. `catch` alone is clean, which rules out `try` itself.
+  test("the same function without a finally, and with only a catch, are both clean", async () => {
+    const r = await compileAndRun(`function noTry(k: number): number {
+  const xs: number[] = [1, 2, 3];
+  return xs.length + k;
+}
+function catchOnly(k: number): number {
+  const xs: number[] = [1, 2, 3];
+  try { return xs.length + k; } catch (e) { return 0; }
+}
+let a = 0;
+for (let i = 0; i < 500; i++) { a = a + noTry(i); }
+console.log("no-try " + __arrLive());
+for (let i = 0; i < 500; i++) { a = a + catchOnly(i); }
+console.log("catch " + __arrLive());`);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe("no-try 0\ncatch 0\n");
+  });
+});
+
 /* Every loop form pushes its own `break`/`continue` target, so every loop form is its own
  * chance to have forgotten the finalizer depth on the entry. */
 describe("every loop form", () => {
