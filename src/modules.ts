@@ -30,10 +30,9 @@ import { dirname, resolve, relative } from "node:path";
 
 import { parse } from "./parser.ts";
 import { moduleError, mutationError } from "./diagnostics.ts";
-import { resolveStaticFieldReads } from "./ast.ts";
+import { resolveStaticFieldReads, walkExprChildren, walkStmtChildren } from "./ast.ts";
 import type {
-  Program, Stmt, Expr, Ty, Declarator, Param, ArrowFunction, VarDecl, FuncDecl, ImportDecl,
-  RecTypeEntry,
+  Program, Stmt, Expr, Ty, Declarator, Param, VarDecl, ImportDecl, RecTypeEntry,
 } from "./ast.ts";
 
 /** How the linker reads a module. Injectable so tests can link in-memory graphs. */
@@ -188,9 +187,35 @@ function rewriteTy<T extends Ty | undefined>(t: T, tags: Map<string, string>, re
 }
 
 /**
- * Alpha-rename a module in place: every occurrence of a mapped name becomes its
- * mapped form, and every Ty string has its class tags rewritten. Uniform renaming
- * (declarations AND uses, at every depth) keeps the module's meaning identical.
+ * Alpha-rename a module: every occurrence of a mapped name becomes its mapped form, and
+ * every Ty string has its class tags rewritten. Uniform renaming (declarations AND uses,
+ * at every depth) keeps the module's meaning identical.
+ *
+ * RECONSTRUCTION, NOT MUTATION. Each method returns a NEW node; the caller rebinds. The
+ * old spelling (`e.name = this.n(e.name)`) was five NT1606 refusals — `objects are
+ * immutable: … would mutate the object in place` — across `param`/`decl`/`stmt`/`expr`
+ * and `linkProgram`, and they were ONE design fact rather than five bugs: this walker's
+ * whole job was in-place AST mutation.
+ *
+ * The alternative was tagging ast.ts's declarations `//@@mutable`, and it is CLOSED, with
+ * the measurement recorded next to `walkExprChildren` in src/ast.ts: `@@mutable` is
+ * NOMINAL, so tagging a member of the `Expr`/`Stmt` union is `NT1009` (measured, one
+ * member tagged and both), and even a tagged receiver is `NT1607` in the ownership pass
+ * because the write goes through a BORROW. Reconstruction needs no new language rule —
+ * `{ ...e, kind: "K", f: v }` typechecks and runs today, through a recursive union.
+ *
+ * THE WALK ITSELF IS NO LONGER DUPLICATED HERE, and that is the point. `walkExprChildren`
+ * and `walkStmtChildren` (src/ast.ts) already rebuild every child and map every `Ty`
+ * slot, exhaustively by kind — tsc refuses a missing arm (TS2366, pinned by
+ * test/tsc.test.ts). This file used to carry a SECOND copy of that walk, and the copy is
+ * exactly why the "walker visits a node and misses one of its fields" defect landed FOUR
+ * times: `NonNullExpr`/`InExpr`, `ForOfStmt.name2`, `ArrowFunction.retAnnot`, and
+ * `CallExpr.typeArgs`. Each was a field ast.ts's walker already handled. Delegating means
+ * a new AST field is picked up here for free, and the only thing left below is the part
+ * that is genuinely this pass's own: the BINDING NAMES.
+ *
+ * `staticExpr`/`staticStmt` in src/ast.ts are the same shape (override the kinds you care
+ * about, delegate the rest), and `linkProgram` already runs one of them.
  */
 class Renamer {
   constructor(private names: Map<string, string>, private tags: Map<string, string>, private refs: Map<string, string> = new Map()) {}
@@ -204,175 +229,95 @@ class Renamer {
   }
   private t<T extends Ty | undefined>(t: T): T { return rewriteTy(t, this.tags, this.refs); }
 
-  program(p: Program): void { p.body.forEach((s) => this.stmt(s)); }
-
-  private param(p: Param): void {
-    p.name = this.n(p.name);
-    p.annot = this.t(p.annot);
-    if (p.default) this.expr(p.default);
-  }
-  private decl(d: Declarator): void {
-    d.name = this.n(d.name);
-    d.annot = this.t(d.annot);
-    d.ty = this.t(d.ty);
-    if (d.init) this.expr(d.init);
+  program(p: Program): Program {
+    // `kind` is restated even though `...p` already carries it: a spread does not carry a
+    // string-LITERAL type, so the result is `{kind:string,…}` and not a `Program` under
+    // nativets itself (NT2001). Same reason every arm of `walkExprChildren` restates its
+    // own tag — see the note on that function in src/ast.ts.
+    return { ...p, kind: "Program", body: p.body.map((s: Stmt): Stmt => this.stmt(s)) };
   }
 
-  stmt(s: Stmt): void {
-    switch (s.kind) {
-      case "VarDecl": (s as VarDecl).decls.forEach((d) => this.decl(d)); return;
-      case "FuncDecl": {
-        const f = s as FuncDecl;
-        f.name = this.dotted(f.name);
-        f.params.forEach((p) => this.param(p));
-        f.returnAnnot = this.t(f.returnAnnot);
-        // No `returnTy` to rename: the RESOLVED return type is `Sig.ret` in the checker's
-        // table, which does not exist yet (the linker runs before the check).
-        f.body.forEach((b) => this.stmt(b));
-        return;
-      }
-      case "ReturnStmt": if (s.argument) this.expr(s.argument); return;
-      case "IfStmt": this.expr(s.test); s.consequent.forEach((x) => this.stmt(x)); s.alternate?.forEach((x) => this.stmt(x)); return;
-      case "WhileStmt": this.expr(s.test); s.body.forEach((x) => this.stmt(x)); return;
-      case "DoWhileStmt": s.body.forEach((x) => this.stmt(x)); this.expr(s.test); return;
-      case "ForStmt":
-        if (s.init) { if ((s.init as Stmt).kind === "VarDecl") this.stmt(s.init as Stmt); else this.expr(s.init as Expr); }
-        if (s.test) this.expr(s.test);
-        if (s.update) this.expr(s.update);
-        s.body.forEach((x) => this.stmt(x));
-        return;
+  /**
+   * A parameter list's BINDING NAMES. `annot` and `default` are already rewritten by the
+   * time this runs — `mapParams` inside `walkExprChildren`/`walkStmtChildren` does both —
+   * so the name is all that is left, and doing it here keeps the two walkers' key order
+   * (`annot` before `default`) untouched.
+   */
+  private paramNames(ps: Param[]): Param[] {
+    return ps.map((p: Param): Param => ({ ...p, name: this.n(p.name) }));
+  }
+
+  /**
+   * Children and every `Ty` slot first (`walkStmtChildren`), then the binding names this
+   * pass owns. Only the five kinds that BIND a name need an arm; everything else is
+   * already finished by the walk, which is why there is no `default` hazard here — a
+   * statement kind that binds nothing needs nothing.
+   *
+   * `FuncDecl.returnTy` is deliberately absent: the RESOLVED return type is `Sig.ret` in
+   * the checker's table, which does not exist yet (the linker runs before the check).
+   * `ForOfStmt.valTy` is absent for the same reason and `walkStmtChildren` skips it too.
+   */
+  stmt(s: Stmt): Stmt {
+    const w = walkStmtChildren(s, (x: Expr): Expr => this.expr(x), (y: Stmt): Stmt => this.stmt(y),
+      (t: Ty): Ty => this.t(t));
+    switch (w.kind) {
+      case "VarDecl":
+        return { ...w, kind: "VarDecl",
+          decls: w.decls.map((d: Declarator): Declarator => ({ ...d, name: this.n(d.name) })) };
+      case "FuncDecl":
+        return { ...w, kind: "FuncDecl", name: this.dotted(w.name), params: this.paramNames(w.params) };
       // `name2` is the VALUE binding of `for (const [k, v] of map)` and is renamed with
       // `name`. Renaming one and not the other is not a cosmetic gap: the rename is
       // UNIFORM (declarations AND uses, see the class header), so the body's reads of `v`
       // became `_m0_v` while the binding stayed `v` — and in a non-entry module that
       // declares its own top-level `v`, `_m0_v` is that module-level binding. The loop
       // then read the CONST on every iteration and node's answer and ours differed with
-      // exit 0 on both sides. Same class as the `NonNullExpr`/`InExpr` miss below: a
-      // walker that visits the node and misses one of its fields.
+      // exit 0 on both sides.
       case "ForOfStmt":
-        s.name = this.n(s.name);
-        if (s.name2) s.name2 = this.n(s.name2);
-        s.annot = this.t(s.annot); s.elemTy = this.t(s.elemTy);
-        this.expr(s.iterable); s.body.forEach((x) => this.stmt(x));
-        return;
-      case "ForInStmt": s.name = this.n(s.name); this.expr(s.object); s.body.forEach((x) => this.stmt(x)); return;
-      case "SwitchStmt": this.expr(s.discriminant); s.cases.forEach((c) => { if (c.test) this.expr(c.test); c.body.forEach((x) => this.stmt(x)); }); return;
-      case "ThrowStmt": this.expr(s.argument); return;
-      case "TryStmt":
-        s.block.forEach((x) => this.stmt(x));
-        if (s.param) s.param = this.n(s.param);
-        s.catchTy = this.t(s.catchTy);
-        s.handler?.forEach((x) => this.stmt(x));
-        s.finalizer?.forEach((x) => this.stmt(x));
-        return;
-      case "ExprStmt": this.expr(s.expr); return;
-      case "BlockStmt": case "MultiStmt": (s.kind === "BlockStmt" ? s.body : s.stmts).forEach((x) => this.stmt(x)); return;
-      default: return; // Break/Continue
+        return { ...w, kind: "ForOfStmt", name: this.n(w.name),
+          name2: w.name2 === undefined ? undefined : this.n(w.name2) };
+      case "ForInStmt": return { ...w, kind: "ForInStmt", name: this.n(w.name) };
+      // `param` is `string | null` (a `catch` with no binding), NOT optional — so the test
+      // is against `null`, matching `walkStmtChildren`'s own arms for `handler`/`finalizer`.
+      case "TryStmt": return { ...w, kind: "TryStmt", param: w.param === null ? null : this.n(w.param) };
+      default: return w;
     }
   }
 
-  expr(e: Expr): void {
-    e.ty = this.t(e.ty);
-    switch (e.kind) {
-      case "Identifier": e.name = this.n(e.name); return;
-      case "TemplateLiteral": e.exprs.forEach((x) => this.expr(x)); return;
-      case "ArrayLiteral": e.elements.forEach((x) => this.expr(x)); return;
-      case "ObjectLiteral": e.properties.forEach((p) => this.expr(p.value)); return; // keys are data
-      case "SpreadExpr": this.expr(e.argument); return;
-      case "MemberExpr": this.expr(e.object); return;                                // property is data
-      case "IndexExpr": this.expr(e.object); this.expr(e.index); return;
-      case "UnaryExpr": this.expr(e.operand); return;
-      case "TypeofExpr": this.expr(e.operand); return;
-      case "UpdateExpr": if (e.targetExpr) this.expr(e.targetExpr); else e.target = this.n(e.target); return;
-      case "BinaryExpr": case "LogicalExpr": this.expr(e.left); this.expr(e.right); return;
-      case "ConditionalExpr": this.expr(e.test); this.expr(e.consequent); this.expr(e.alternate); return;
-      case "SequenceExpr": e.exprs.forEach((x) => this.expr(x)); return;
-      case "AssignExpr": e.target = this.n(e.target); this.expr(e.value); return;
-      case "IndexAssign": this.expr(e.object); this.expr(e.index); this.expr(e.value); return;
-      case "FieldAssign": this.expr(e.object); this.expr(e.value); return;
-      case "AsExpr": case "SatisfiesExpr": e.ty = this.t(e.ty)!; this.expr(e.expr); return;
-      // PRE-EXISTING BUG, and the two kinds that were missing. `NonNullExpr` (`x!`) and
-      // `InExpr` (`k in o`) fell through to `default`, which is the LITERAL case — so
-      // every module-level name underneath one of them kept its unprefixed spelling in a
-      // non-entry module. `export const table = […]` read as `table[0]!` from a second
-      // module was `'table' is not defined`, and `fields(m)[0]!` was `NT1003 unknown
-      // callee`. Both are correct TypeScript that node runs. Found via src/ast.ts:404
-      // (`unionTagValues`), which is why seven modules reported an ast.ts blocker.
-      case "NonNullExpr": this.expr(e.expr); return;
-      case "InExpr": this.expr(e.key); this.expr(e.object); return;
-      case "InstanceOfExpr": e.className = this.n(e.className); this.expr(e.object); return;
-      case "NewExpr": {
-        e.callee = this.n(e.callee);
-        // Bound to a LOCAL before the guard, not narrowed in place on the field. Both
-        // spellings are the same program under tsc, but `if (e.typeArgs) e.typeArgs.map(…)`
-        // is NT1002 here (`method call on ?Ustring[]` — the narrowing does not survive the
-        // member access), and this file has to stay inside the subset nativets compiles
-        // ITSELF in. Verified on the exact shape against node before adopting it.
-        const ta = e.typeArgs;
-        if (ta) e.typeArgs = ta.map((t) => this.t(t)!);
-        e.args.forEach((a) => this.expr(a));
-        return;
-      }
-      // `typeArgs` are EXPLICIT call-site type arguments (`countOf<Point>(xs)`), and they
-      // were the FOURTH field this walker visited a node and missed — after `NonNullExpr`/
-      // `InExpr`, `ForOfStmt.name2` and `ArrowFunction.retAnnot` above. The `NewExpr` arm
-      // right above has always rewritten its own `typeArgs`; this one did not, so an
-      // explicit type argument in a non-entry module kept that module's PRE-rename spelling
-      // while the declaration it names was alpha-renamed, and the call met the two
-      // spellings as two types: `expects Point{x:number}[], got _m0_Point{x:number}[]`.
-      // Like `retAnnot` — and unlike `paramTys`/`retTy`/`ForOfStmt.valTy`, which the checker
-      // fills in AFTER the link — `typeArgs` is set by the PARSER, so it is live here.
-      // See test/modules/calltypeargs.
-      case "CallExpr": {
-        const ta = e.typeArgs;
-        if (ta) e.typeArgs = ta.map((t) => this.t(t)!);
-        this.expr(e.callee); e.args.forEach((a) => this.expr(a));
-        return;
-      }
-      case "ArrowFunction": {
-        const a = e as ArrowFunction;
-        a.params.forEach((p) => this.param(p));
-        // `retAnnot` is the DECLARED return type of `(x): T => …`, and it was the field
-        // this arm missed — the third instance of the walker-misses-a-field class already
-        // recorded above (`NonNullExpr`/`InExpr`, `ForOfStmt.name2`). It is also the only
-        // one of these three Ty slots that holds anything HERE: the parser sets `retAnnot`
-        // (and expands the alias into it), while `paramTys` and `retTy` are written by the
-        // checker, which runs after the link. So every annotated arrow in every imported
-        // module carried its module's PRE-rename `@N`, and the refusal printed the two
-        // spellings as one type: `return type U<…inner:@_m0_Expr> does not match declared
-        // U<…inner:@Expr>`. See test/modules/arrow-retannot.
-        a.retAnnot = this.t(a.retAnnot);
-        if (a.paramTys) a.paramTys = a.paramTys.map((t) => this.t(t)!);
-        a.retTy = this.t(a.retTy);
-        if (a.exprBody) this.expr(a.body as Expr); else (a.stmts as Stmt[]).forEach((s) => this.stmt(s));
-        return;
-      }
-      // The kinds with no sub-expressions, listed rather than defaulted. `default: return`
-      // is what let `NonNullExpr` and `InExpr` be silently skipped for as long as they
-      // have existed: a walker whose fall-through means "nothing to do" cannot tell a
-      // leaf from a node someone forgot. The `never` binding below makes a new `Expr`
-      // kind a TYPE error here instead of a missed rename at run time.
-      //
-      // KEPT. `walkExprChildren`/`walkStmtChildren` in ast.ts dropped the same idiom
-      // because those switches return from every arm, so tsc's TS2366 already refuses a
-      // missing member and the `never` binding (which erases to `number` here, hence
-      // NT2001) was pure self-host cost. This switch returns `void`, so tsc says nothing
-      // without the binding — verified: delete it and the `CallExpr` arm together and
-      // `tsc -p tsconfig.src.json --noEmit` exits 0. It is the only guarantee here.
-      //
-      // It also costs nothing measurable today. A class member lowers to a top-level
-      // `FuncDecl` (`Renamer.expr`) at parse time, so this IS in blocker-metric's
-      // denominator — but the body's first blocker is the NT1606 on `e.ty = v` at the
-      // very top, so the NT2001 down here is masked. Clear that one and this becomes a
-      // real cost worth re-measuring.
-      case "NumberLiteral": case "StringLiteral": case "BooleanLiteral":
-      case "UndefinedLiteral": case "NullLiteral":
-        return;
-      default: {
-        const unhandled: never = e;
-        void unhandled;
-        return;
-      }
+  /**
+   * Children and every `Ty` slot first (`walkExprChildren`), then the identifier fields
+   * this pass owns. Six kinds carry a name; the rest are finished by the walk.
+   *
+   * WHAT THE `never` BINDING HERE USED TO BUY, and why its removal is not a step back.
+   * The old switch returned `void`, so tsc could not tell a missing arm from a leaf — a
+   * `default: return` that means "nothing to do" is exactly what let `NonNullExpr` and
+   * `InExpr` be skipped for as long as they existed, and the `never` binding was added to
+   * make a new `Expr` kind a type error instead of a missed rename. It never protected
+   * against the defect that actually kept landing, though: all four misses on record
+   * (`NonNullExpr`/`InExpr`, `ForOfStmt.name2`, `ArrowFunction.retAnnot`,
+   * `CallExpr.typeArgs`) were an arm that EXISTED and forgot a FIELD, which no
+   * exhaustiveness check over `kind` can see. Delegating moves the child/`Ty` half to a
+   * walker tsc DOES check exhaustively (TS2366, test/tsc.test.ts), so the residual
+   * exposure is a new `Expr` kind that binds an IDENTIFIER — the six below are the entire
+   * set today, and `Renamer.expr` is named in the `walkExprChildren` header as a caller to
+   * revisit. The binding also cost a real NT2001 (`never` erases to `number` here), which
+   * was masked behind the NT1606 this rewrite removes and would otherwise be live now.
+   */
+  expr(e: Expr): Expr {
+    const w = walkExprChildren(e, (x: Expr): Expr => this.expr(x), (y: Stmt): Stmt => this.stmt(y),
+      (t: Ty): Ty => this.t(t));
+    switch (w.kind) {
+      case "Identifier": return { ...w, kind: "Identifier", name: this.n(w.name) };
+      // `target` is the NAME form of `x++`; when `targetExpr` is set the target is an
+      // expression (`o.f++`, `a[i]++`) that the walk above already rewrote, and `target`
+      // is not a binding reference at all. Renaming it in that case would be wrong.
+      case "UpdateExpr":
+        return w.targetExpr !== undefined ? w : { ...w, kind: "UpdateExpr", target: this.n(w.target) };
+      case "AssignExpr": return { ...w, kind: "AssignExpr", target: this.n(w.target) };
+      case "InstanceOfExpr": return { ...w, kind: "InstanceOfExpr", className: this.n(w.className) };
+      case "NewExpr": return { ...w, kind: "NewExpr", callee: this.n(w.callee) };
+      case "ArrowFunction": return { ...w, kind: "ArrowFunction", params: this.paramNames(w.params) };
+      default: return w;
     }
   }
 }
@@ -597,6 +542,23 @@ function materializeTextImports(program: Program, path: string, read: ReadModule
   });
 }
 
+/**
+ * A module's body with its text imports (SH5) materialized at the head.
+ *
+ * UNCONDITIONAL, and that is the point. `materializeTextImports` already answers `[]` for
+ * a module with no text imports, so the `if (textImports?.length)` guard this replaces was
+ * an optimization and never a behavior. Spelling it as one expression is what keeps the
+ * caller free of a TERNARY — and a ternary here is not free under nativets itself: the
+ * literal branch types as `U<…every Stmt member inlined…>[]` while the untouched branch
+ * types as the nominal back-edge `@Stmt[]`, which are the same type in two spellings and
+ * so `NT2001 Ternary branches differ`. Measured: it is exactly what this function's
+ * absence cost, and it replaced the `NT1606` this rewrite set out to remove rather than
+ * clearing it.
+ */
+function bodyWithTextImports(p: Program, path: string, read: ReadModule): Stmt[] {
+  return [...materializeTextImports(p, path, read), ...p.body];
+}
+
 /* ------------------------------------------------------------------ linker */
 
 /**
@@ -610,7 +572,10 @@ export function linkProgram(entrySource: string, entryPath?: string, read: ReadM
     // Ordinary single-module program — but it may still inline text (SH5), which is a
     // read, not a graph edge, so it needs no linking pass.
     if (first.textImports?.length) {
-      first.body = [...materializeTextImports(first, resolve(entryPath ?? "entry.ts"), read), ...first.body];
+      // Rebuilt, not mutated (`first.body = …` is NT1606). `first` is this call's own
+      // `parse` result and nothing else holds it, so returning a new Program is invisible
+      // to every caller.
+      return { ...first, kind: "Program", body: bodyWithTextImports(first, resolve(entryPath ?? "entry.ts"), read) };
     }
     return first;
   }
@@ -668,8 +633,10 @@ export function linkProgram(entrySource: string, entryPath?: string, read: ReadM
     // 2. The real parse, with imported types in scope. A text import (SH5) becomes a
     //    `const` at the head of the body BEFORE the rename below, so it is an ordinary
     //    top-level binding of this module and is mangled like any other.
-    const program = parse(source, { typeEnv, asyncEnv, file: path });
-    if (program.textImports?.length) program.body = [...materializeTextImports(program, path, read), ...program.body];
+    //    Rebuilt rather than assigned into (`program.body = …` is NT1606), and bound to a
+    //    SECOND name so everything below still reads a `const`.
+    const parsed = parse(source, { typeEnv, asyncEnv, file: path });
+    const program: Program = { ...parsed, kind: "Program", body: bodyWithTextImports(parsed, path, read) };
 
     // 3. Rename map: imported locals → the exporting module's final names; own
     //    top-level bindings → a module-unique name (the entry keeps its own names,
@@ -710,7 +677,11 @@ export function linkProgram(entrySource: string, entryPath?: string, read: ReadM
       recTypes.set(refRenames.get(e.name) ?? e.name, rewriteRefs(rewriteTags(e.ty, tags), refRenames) as Ty);
     }
     for (const h of program.hostImports ?? []) hostImports.add(h);
-    new Renamer(names, tags, refRenames).program(program);
+    // The rename REBUILDS the body (see the `Renamer` header), so its result is what gets
+    // merged and published. Everything read below this line other than `body` — `exports`,
+    // `recTypes`, `hostImports` — is carried across untouched by the spread, and the
+    // Renamer never visited any of them.
+    const renamed = new Renamer(names, tags, refRenames).program(program);
 
     // 4. Publish this module's export table under the final names.
     let finalExports = new Map<string, string>();
@@ -738,8 +709,8 @@ export function linkProgram(entrySource: string, entryPath?: string, read: ReadM
       finalTypes = finalTypes.set(exported, rewriteTy(ty, tags, refRenames));
     }
 
-    mods.set(path, { path, source, program, finalExports, finalTypes, asyncExports });
-    body.push(...program.body);
+    mods.set(path, { path, source, program: renamed, finalExports, finalTypes, asyncExports });
+    body.push(...renamed.body);
   });
 
   // A STATIC field lowers to a module-level `const C.f`, and a read of one is rewritten to

@@ -257,9 +257,19 @@ describe("switch exhaustiveness in src/ast.ts", () => {
   const AST = join(ROOT, "src/ast.ts");
   const source = readFileSync(AST, "utf8");
 
-  /** The `{ … }` span of top-level `function NAME(`, brace-counted (arms nest braces). */
+  /**
+   * The `{ … }` span of top-level `function NAME(`, brace-counted (arms nest braces).
+   *
+   * `export` is accepted on the declaration, and that is not cosmetic: this locator used
+   * to match `\nfunction NAME(` only, so the day `walkExprChildren`/`walkStmtChildren`
+   * were exported (src/modules.ts's `Renamer` delegates to them rather than carrying a
+   * second copy of the walk) all four of their assertions here failed on `expect(at)`,
+   * reporting the exhaustiveness guarantee as broken when nothing about it had changed.
+   */
   function bodySpan(src: string, name: string): [number, number] {
-    const at = src.indexOf(`\nfunction ${name}(`);
+    const plain = src.indexOf(`\nfunction ${name}(`);
+    const exported = src.indexOf(`\nexport function ${name}(`);
+    const at = plain >= 0 ? plain : exported;
     expect(at).toBeGreaterThan(-1);
     const open = src.indexOf("{", at);
     let depth = 0;

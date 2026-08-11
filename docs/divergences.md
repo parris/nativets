@@ -39,24 +39,166 @@ Rules:
 
 - **Covered accessors:** array read `a[i]`, string index `s[i]`, `Uint8Array` read `u[i]` **and
   write** `u[i] = v` (including compound `u[i] += v`), and `arr.with(i, v)` (flat *and* past the
-  32-element persistent-trie threshold — node throws a `RangeError` here, so node stops too).
-  **Negative indices panic everywhere** (they are not Python-style wrap-around).
+  32-element persistent-trie threshold). **Negative indices panic everywhere** (they are not
+  Python-style wrap-around). See the next bullet for what node actually does at each of these —
+  the answer is not uniform, and the `.with` case is a real divergence, not a shared stop.
+- **What node does with a NEGATIVE index — and where our rule genuinely diverges.** Verified
+  against node, every case:
+
+  | expression | node | nativets |
+  |---|---|---|
+  | `a[-1]` on `[1,2,3]` | `undefined` | panic |
+  | `"abc"[-1]` | `undefined` | panic |
+  | `u[-1]` on a 3-byte array | `undefined` | panic |
+  | `u[-1] = 7` | silent no-op (sets a `"-1"` property) | panic |
+  | `[1,2,3].with(-1, 9)` | **`[1,2,9]`** | **panic** |
+  | `[1,2,3].with(-4, 9)` | `RangeError` | panic |
+  | `[1,2,3].with(3, 9)` | `RangeError` | panic |
+
+  **node never stops on a negative index at any of these accessors.** An earlier draft of this
+  section justified the whole negative-index rule with "node throws a `RangeError` here, so node
+  stops too". That is true **only when the index is out of range** — `i >= len`, or `i < -len`
+  for `.with`. It was never true for an *in-range* negative index, and it was never true at all
+  for `a[i]` / `s[i]` / `u[i]`, which are plain `undefined` in node. The claim is withdrawn.
+
+  The rule still stands for the four `undefined` rows, on the Stage-41 reasoning above,
+  unchanged: node's answer there is a phantom value, and propagating it quietly is the outcome
+  we rejected. **`.with(-1, v)` is the one row that reasoning does not cover** — node has a
+  defined, useful, non-phantom answer (`[1,2,9]`), and we abort on a correct program.
+  Recorded as a divergence rather than silently repaired: see **STILL OPEN** below.
 - **A panic is NOT an exception.** It deliberately does not go through the Stage-20
   pending-exception protocol: `try { a[5] } catch {}` still aborts, and a `finally` does not run.
   It stops the program; it is not a control-flow construct.
 - **`.at(i)` is the node-exact escape hatch** and is unchanged: it returns `T | undefined`
-  (`a.at(5)` → `undefined`, `a.at(-1)` → the last element), matching node byte for byte. It is the
-  documented way to ask "give me `undefined` instead of panicking", which is what the panic's
-  `help:` line names. `String#charAt(i)` is likewise untouched — node *defines* it as `""` out of
-  range, so it is not a defect and does not panic.
+  (`a.at(5)` → `undefined`, `a.at(-1)` → the last element), matching node byte for byte.
+  `String#charAt(i)` is likewise untouched — node *defines* it as `""` out of range, so it is not
+  a defect and does not panic.
+
+  **But `.at` is only the right advice for a NON-NEGATIVE read**, and both the `NT2002` hint and
+  the runtime `help:` line currently offer it unconditionally. Two ways that is wrong:
+
+  - **Negative index:** the hint on `a[-1]` reads "use `.at(-1)` if you want `undefined` instead
+    of a panic". `a.at(-1)` is **`3`**, not `undefined` — node's `a[-1]` is `undefined` and
+    `a.at(-1)` is the *last element*. Following the hint changes the program's answer instead of
+    preserving it. Same for `"abc".at(-1)` → `"c"` and `u.at(-1)` → the last byte.
+  - **Not a read:** on `u[i] = v` and on `arr.with(i, v)` the `help:` line still says `.at(…)`.
+    `.at` is a read — it cannot express either one, so the advice is not actionable at all.
+
+  Both are live defects in the diagnostics, not in this document; they are filed with repros
+  under "Reported, not fixed here" at the end of this section.
 - **Compile-time beats runtime.** When the length and the index are both statically known — a
   literal array/string, or a `const` bound to one, indexed by a numeric literal — the program is
   **rejected** with **`NT2002`** (`index 5 is out of bounds for an array of length 3`) rather than
   built and aborted. It is a real user error, hence the NT2xxx type-error band rather than the
   NT1xxx "not yet implemented" gradient, and `coverage` surfaces it.
+
+  **This covers index syntax only.** `a[5]`, `a[-1]` and `s[7]` on a `const` literal are all
+  `NT2002`; `a.with(5, 9)` and `a.with(-1, 9)` on the same `const` are **not** — they compile and
+  panic at run time, even though both operands are just as statically known. Not a correctness
+  hole (the program stops either way), but `.with` is listed as a covered accessor above and does
+  not get the compile-time treatment the other four do.
 - **Only written indices panic.** Compiler-generated in-bounds reads (`for-of`, the array HOFs,
   `JSON.stringify`, destructuring, spread-call expansion) keep the internal non-panicking
   accessor, so nothing pays twice and in-bounds programs are behaviourally unchanged.
+
+#### STILL OPEN — `.with(-1, v)` panics on a program node runs correctly
+
+The only row in the table above where we abort on a program node completes. Kept as an open
+divergence rather than repaired in this lane, because repairing it is a **behaviour change** and
+this is a documentation audit.
+
+```ts
+const a: number[] = [1, 2, 3];
+const b = a.with(-1, 9);   // node: [1,2,9]     nativets: panic, exit 134
+console.log(b[0], b[1], b[2]);
+```
+
+**What it would cost to match node.** Less than the other four rows, and that asymmetry is the
+argument for doing it. `a[-1]` → `undefined` cannot be matched without making every element read
+a nullable `T | undefined` box — the whole language pays for it, which is exactly the trade
+rejected above. **`.with` pays none of that**: it returns an array, never `undefined`, so the
+result type is unchanged and no box appears anywhere. The change is one line of index resolution
+at the accessor — `i < 0 ? i + len : i`, then the existing bounds check, which still panics for
+`i < -len` and `i >= len` where node throws a `RangeError` and stops too. Both the flat and the
+past-32 trie path go through it.
+
+So the negative-index rule is uniform in the code but **not** uniform in its justification: four
+accessors are covered by the Stage-41 phantom-value argument, and `.with` is covered by nothing
+except consistency with them. Whoever changes it should change the rule, not this document.
+
+#### Reported, not fixed here — two lying hints on this path
+
+Both are in files held by other lanes at the time of the audit, so they are filed rather than
+patched. Both are the "hint recommends code that does something else" class.
+
+1. **`src/checker.ts` (`NT2002` hint) — `.at(-1)` does not give `undefined`.** For a negative
+   literal index the hint reads ``use `.at(-1)` if you want `undefined` instead of a panic``.
+   Verified in node: `[1,2,3][-1]` is `undefined`, but `[1,2,3].at(-1)` is `3`. The hint's advice
+   silently changes the answer. Repro: `const a: number[] = [1,2,3]; console.log(a[-1]);`
+   Applies to strings (`"abc".at(-1)` → `"c"`) and `Uint8Array` alike. The suggestion is only
+   sound for a non-negative index; for a negative one the honest advice is `?? fallback` on
+   `.at(i)` **only if the wrap-around is wanted**, and otherwise a length check.
+2. **`runtime/runtime.c` (`nt_panic_bounds` help line) — `.at` is suggested for non-reads.** The
+   line is built once for every accessor, so a `Uint8Array` **write** (`u[-1] = 7`) and
+   `arr.with(-1, 9)` both advise ``use `.at(-1)` to get `undefined` instead of panicking``.
+   `.at` is a read and cannot express either operation. It also inherits defect 1 for every
+   negative index. The fix wants the suggestion to depend on the `what` argument the caller
+   already passes, rather than being unconditional.
+
+### A string past node's maximum length PANICS (node throws a catchable `RangeError`)
+
+`"abc".padStart(Infinity, "xy")`, `"x".repeat(2 ** 53)` and friends are a **`RangeError` at
+exit 1** in node. nativets stops too, but as a **panic**:
+
+```
+panic: invalid string length: the padded string would be Infinity bytes, past the 536870888-byte maximum
+  help: node throws `RangeError: Invalid string length` at exactly this boundary; build the
+        text in pieces, or write it out incrementally, instead of materialising one string this large
+```
+
+```
+panic: invalid count value: -1
+  help: `.repeat(n)` needs `n` to be finite and >= 0; node throws `RangeError: Invalid count value: -1`
+```
+
+on **stderr**, stdout flushed first and byte-comparable up to the stop, `abort()` → **exit 134**.
+**The exit code is the divergence** (node's is 1), and so is catchability: like every other panic
+this does not go through the pending-exception protocol, so `try`/`catch` cannot stop it.
+
+**The cap is node's own number.** V8's maximum string length on 64-bit is `2**29 - 24` =
+**536870888**, found by binary search against node v24: `"abc".padStart(536870888)` succeeds on
+both sides and `536870889` stops on both. We count **UTF-8 bytes** where node counts UTF-16 code
+units (§A.2), so the boundaries coincide for ASCII and ours is the stricter one above U+007F.
+
+**Covered:** `String#padStart`, `String#padEnd`, `String#repeat` (both its `RangeError`s — the
+count check of ES 22.1.3.18 step 3 runs *before* the length check, which is why `"".repeat(Infinity)`
+stops while `"".repeat(1e100)` is a plain `""`), and `+` / `String#concat`. `new Array(n)` never
+reaches this: it is refused at compile time (`NT1012`).
+
+**Why a panic and not a raise, when node throws something catchable.** The pending-exception
+protocol *could* carry a `RangeError`, and that would match node's exit code. It would also make
+every `.repeat` / `.padStart` / `.padEnd` call site a **fallible call**, which `emitExcCheck`
+*refuses to compile* inside a `try` with no `catch`, and inside a `try` whose `catch` binds an
+object type. Those are ordinary formatting calls: the trade would be a rare stop for a common
+**rejection of programs that compile and run correctly today**. One stop discipline — the same one
+as an out-of-range index and `nativets: out of memory` — is worth the exit code.
+
+**What this replaced.** All four builders took their length as `(long)d`, which C leaves
+**undefined** for a non-finite or out-of-range double, and then did the size arithmetic in `size_t`,
+which **wraps**. Measured, that was worse than a divergence:
+
+| | nativets (before) | node |
+|---|---|---|
+| `"abc".padStart(Infinity, "xy")` | SIGABRT, **empty stderr** on arm64; `"abc"` at **exit 0** on x86-64 | `RangeError`, exit 1 |
+| `"abcd".repeat(2 ** 62)` | **SIGBUS, empty stdout AND stderr** — 2^64 bytes truncated to 0, so it wrote 2^62 times into a **1-byte** buffer | `RangeError`, exit 1 |
+| `"".repeat(1e100)` | **hung forever** (a `LONG_MAX`-trip loop of zero-byte copies) | `""` |
+| `"x".repeat(-1)` | `""` at **exit 0** | `RangeError`, exit 1 |
+
+The `repeat` wrap was an out-of-bounds heap write in a memory-safe compiler, and it had smashed
+stdio's own buffer before it died — which is why even the line printed *before* the fault was lost.
+Every length argument now goes through ES 7.1.5 `ToIntegerOrInfinity` **as a double**, so ±Infinity
+survives the conversion, and the size arithmetic is done in double, which is exact below the cap and
+cannot wrap. Regression tests: `test/panic.test.ts`, "string length".
 
 ### Decorators — a class method that assigns a field (`docs/decorators.md`)
 
@@ -270,6 +412,58 @@ which are **refusals or already-documented consequences**, never approximations:
   `NT1601`. Pinned in the same block.
 - **`Date.now()` is not node-differential** (a clock read): it is tested behaviorally —
   monotonic, whole milliseconds, plausible epoch range.
+
+### base64 (`btoa`/`atob`) — the BINARY-STRING contract, and it is NOT a divergence
+
+This one is here because it *was* a divergence, silently, and is not one any more.
+
+`btoa`/`atob` are defined on a **binary string**: one **code point** per byte. Ours were
+implemented as "pure byte ops over the string's bytes" — the one reading of them that is
+never right, because §A.2's UTF-8 byte orientation had reached the single function whose
+entire contract is *which bytes those are*:
+
+| | node | nativets, before |
+|---|---|---|
+| `btoa("é")` | `6Q==` | `w6k=` |
+| `btoa("你")` | **throws** `InvalidCharacterError` | `5L2g`, **exit 0** |
+| `atob("YQ===")` | **throws** | `"a"` |
+| `atob("!!!!")` | **throws** | `""` |
+| `atob("/w==")` stdout | `C3 BF` | the bare byte `FF` — stdout that is not valid UTF-8 |
+
+Two of those are the worst outcome the prime directive names, and the last is the
+byte-level one a text-decoding comparison would have shown as a match.
+
+**Now:** `btoa` decodes its UTF-8 input to code points and takes each one's single byte;
+above U+00FF there is no byte, so it raises — which is also where a **lone surrogate**
+(`\ud800`, WTF-8 in our representation) and a **malformed sequence** land, the latter
+because node's string would hold U+FFFD there, above U+00FF for the same reason. `atob`
+implements WHATWG *forgiving-base64 decode* (strip the five ASCII whitespace code points —
+**VT is not one**; strip up to two trailing `=` only from a length that is already `%4 == 0`;
+then reject a non-alphabet character, then a length leaving remainder 1) and re-encodes each
+decoded byte as the code point of that value. `atob(btoa(s)) === s` for every `s` `btoa`
+accepts.
+
+**The throw follows the `JSON.parse` precedent** rather than inventing one: the runtime
+raises on the pending-exception slot (`nt_exc_raise_msg`) and codegen emits the matching
+`emitExcCheck`, exactly as for `JSON.parse` and `decodeURIComponent`. So it is **catchable
+in a `try` in the same frame**, and uncaught it exits 1 with node's stdout. `emitExcCheck`'s
+existing refusals now reach these calls too, unchanged and for the unchanged reason —
+`btoa("x")` inside a `finally`-only `try` is `NT1004` ("a call that can raise inside a `try`
+that has a `finally` and no `catch`"), exactly as `JSON.parse` there already was. Both are
+pinned in `test/fuzz-diff.test.ts`.
+
+**What still differs, and why neither is a base64 question:**
+
+- **The message shape.** node's `e` is a `DOMException`; ours is the string
+  `"InvalidCharacterError: Invalid character"` (or `"…: The string to be decoded is not
+  correctly encoded."`). That is the pre-existing shape of *every* runtime-raised message —
+  `JSON.parse`, `fs`, `fetch` all do this — not something this pair decides.
+- **`.length` of a non-ASCII decode.** `atob("////").length` is `6` here and `3` in node:
+  three `0xFF` bytes are three code units in node and six UTF-8 bytes here. That is §A.2, the
+  documented index-space divergence. The decoded **value** is equal (`atob("////") ===
+  "ÿÿÿ"` is `true` on both sides); only the index space differs.
+- **A decoded NUL truncates** — `atob("AA==")` is `""`, not `"\0"`. That is the runtime-NUL
+  door, tabulated with the rest of them under `NT1705` above.
 
 ### Number → String is NOT a divergence (it used to be, silently)
 
@@ -498,10 +692,27 @@ Everything else about Batch 3:
   bounded residual leak, never a dangling pointer (`__strLive()` will not return to 0 in a
   program that builds URLs).
 - **`Object.freeze(o)` is the identity, and that is honest**: objects are already immutable
-  (Stage 29), so freezing changes nothing and node's contract (same object back, non-writable)
-  holds exactly; `Object.isFrozen` is therefore constant-`true`. `Object.assign`/
-  `defineProperty`/`setPrototypeOf` MUTATE their target and are refused with **`NT1606`**
-  pointing at object spread.
+  (Stage 29), so freezing changes nothing and node's contract for `freeze` itself (same object
+  back, non-writable) holds exactly. `Object.assign`/`defineProperty`/`setPrototypeOf` MUTATE
+  their target and are refused with **`NT1606`** pointing at object spread.
+
+  **`Object.isFrozen` is constant-`true`, and that DOES diverge — it is a silent wrong answer.**
+  An earlier version of this bullet stated the constant-`true` as if it followed from node's
+  contract holding. It does not: node answers `isFrozen` about *this object's* state, not about
+  whether the language permits mutation, so a never-frozen object is `false` there.
+
+  ```ts
+  const o = { a: 1 };
+  console.log(Object.isFrozen(o));         // node: false      nativets: true
+  console.log(Object.isFrozen(Object.freeze(o)));  // node: true   nativets: true
+  ```
+
+  Exit 0 on both sides, no diagnostic — so this is the project's own worst category, a
+  wrong answer that keeps running, and it is recorded here rather than left implied. The
+  post-`freeze` answer agrees; only the pre-`freeze` one is wrong. Two honest repairs exist and
+  neither is taken yet: refuse `Object.isFrozen` outright (`NT1023`, consistent with how
+  `Date#setHours` and `URL#href` are handled — it cannot be answered without a per-object frozen
+  bit we do not carry), or add that bit. Reported alongside the diagnostics defects above.
 - **`String#normalize` and `#localeCompare` are refused** (`NT1023`), not approximated:
   normalization needs the Unicode character database and collation needs ICU
   (`"a".localeCompare("B")` is `-1` in node but `+1` under any byte compare — §A on string
@@ -942,7 +1153,9 @@ the Stage 41 runtime panic — where node yields `undefined`. So:
 | `a?.[99]`, `a` present, len 2 | `undefined` | **panics** (Stage 41) |
 
 Reading the guard as "make this read safe" is therefore wrong: it makes the *base* safe. Use
-`.at(i)` for node's out-of-range `undefined`, exactly as with a plain `a[i]`.
+`.at(i)` for node's out-of-range `undefined`, exactly as with a plain `a[i]` — **but only for a
+NON-NEGATIVE `i`**. `.at(-1)` is node's *last element*, not `undefined`, so it is not a
+substitute for `a?.[-1]`; see the headline section's `.at` bullet for the full trap.
 
 **`?.` in a write position is refused (`NT0001`) — this is agreement with node, not a
 divergence.** ECMAScript's `IsValidSimpleAssignmentTarget` returns `false` for an
@@ -1370,6 +1583,15 @@ NUL computed at RUN time still truncates silently, and these all remain open:
 | `("a" + String.fromCharCode(0) + "b").length` | `3` | `2` |
 | `readFileSync(binaryFile, "utf8").length` (NUL inside) | full length | truncated at the NUL |
 | `JSON.parse` of JSON text holding a `\u0000`, then `.length` | `3` | `1` |
+| `atob("AA==")` — base64 that decodes to a zero byte | `"\0"` (length `1`) | `""` (length `0`) |
+
+The `atob` row is the newest; it was found while making that pair node-exact (see
+"base64 (`btoa`/`atob`) — the BINARY-STRING contract" below). It belongs to THIS door, not
+to base64: `atob` is *supposed* to produce a byte of any value, so the single input class it
+cannot represent is exactly the one a NUL-terminated string forbids. Raising there was
+considered and rejected — node **accepts** `atob("AA==")`, so a throw would be a divergence
+invented to paper over a representation limit, in a function whose neighbouring rows in this
+very table stay silent. It closes when they do.
 
 `String.fromCharCode(0)` in particular **must not** be refused: `src/lexer.ts` and
 `src/modules.ts` both call it deliberately (it is how the compiler spells a NUL now that a
@@ -1385,13 +1607,43 @@ to the character `"1"` (`charCodeAt` 49) where node says 1. `\1`…`\7` are ECMA
 B.1.2 **LegacyOctalEscapeSequence**, and so is `\0` when a decimal digit follows it —
 `"\01"` is U+0001, *not* a NUL then `"1"`.
 
-These are **not** a divergence: they are SyntaxErrors in strict mode, and a TypeScript module
-is strict, so node refuses them too (`SyntaxError: Octal escape sequences are not allowed in
-strict mode`). They are `NT0001`, the ordinary syntax band. A bare `\0` is untouched — it is
-the NUL escape, legal in strict mode, and refused as `NT1705` for its own reason.
+They are `NT0001`, the ordinary syntax band. A bare `\0` is untouched — it is the NUL escape,
+legal in strict mode, and refused as `NT1705` for its own reason.
 
-`\8` and `\9` are **NonOctalDecimalEscapeSequence**, decode to `"8"`/`"9"` exactly as node
-does, and stay accepted (test262 `legacy-non-octal-escape-sequence-8-non-strict.js`).
+**These ARE a divergence for a script-shaped file, and the earlier claim that they are not was
+wrong.** That claim read: "they are SyntaxErrors in strict mode, and a TypeScript module is
+strict, so node refuses them too". The premise is true and the conclusion does not follow,
+because **whether node treats a `.ts` file as strict depends on the file's shape**, and the
+fixtures this rule is tested on are the shape that is *not* strict. Measured, all four
+combinations:
+
+| file | `"a\1b"` under node | `"a\8b"` under node | nativets |
+|---|---|---|---|
+| **script** — no `import`/`export`, no `"use strict"` | **prints `1`, exit 0** | prints `a8b`, exit 0 | `\1` **refused** `NT0001`; `\8` → `a8b` |
+| **module** — any `import`/`export` (or `"use strict"`) | `SyntaxError` | `SyntaxError` | `\1` refused `NT0001`; `\8` **accepted** |
+
+node's type-stripping loads a bare `.ts` as CommonJS, which is sloppy mode; an `export` makes it
+a module, which is strict. Since a divergence fixture is normally a single file with no
+`import`/`export`, `node <file>` — this project's oracle, literally — runs it **sloppy**. So:
+
+- **`\1`…`\7` refuse a program node accepts.** That is a real refusal and it belongs in this
+  document as one, which is why this entry no longer claims exemption. The refusal itself is
+  kept — the value half of the original finding stands (node decodes `"a\1b"` to U+0001, and we
+  used to produce the character `"1"`, `charCodeAt` 49, which was a silent wrong answer), and
+  refusing a deprecated Annex B form is the safe direction.
+- **`\8` and `\9` are the mirror gap.** They are **NonOctalDecimalEscapeSequence**, decode to
+  `"8"`/`"9"`, and that matches node in the script shape (test262
+  `legacy-non-octal-escape-sequence-8-non-strict.js` — note the cited file is the *non-strict*
+  one). In the module shape node rejects them (`SyntaxError: \8 and \9 are not allowed in strict
+  mode`) and we accept. Not a wrong answer in either shape, but it is us being more permissive
+  than node, and it is the same strictness question answered the other way.
+
+The inconsistency worth naming: the old text reasoned "the file is strict" for `\1` and cited a
+**non-strict** test262 case for `\8`, two lines apart. Both cannot be the oracle for one file.
+`test/nul-string.test.ts` carries the same claim in its header comment ("a TypeScript module IS
+strict … Verified against node run as ESM") while its own fixtures are script-shaped and it
+asserts only the `NT` code, never a node-differential run — that comment wants the same
+correction.
 
 > Fixing this needed `\uHHHH` / `\u{H+}` to exist at all: `\u` was not an escape the lexer
 > knew, so it fell through to "an unknown escape is the character itself", and `"a\u0041b"`
@@ -2720,6 +2972,14 @@ scheduler thread.
 We store strings as NUL-terminated UTF-8 and measure/slice by byte. Identical to JS for
 ASCII (all fixtures); differs for non-ASCII (an emoji is 4 bytes here, 2 UTF-16 units in JS).
 
+**Scope: this is about the UNIT, not about character identity.** §A.2 covers how a string is
+*measured* (`.length`) and *cut* (`slice`, `substring`, `s[i]`, `indexOf`) — byte offsets
+instead of UTF-16 code-unit offsets. It does **not** license returning the wrong *character*.
+`toUpperCase`/`toLowerCase` were once read as covered here and were a no-op outside ASCII;
+they were not covered, and that was a defect, not a decision — `é` → `É` is two bytes to two
+bytes in either encoding, so no unit question arises. It is fixed; the *remaining* limit on
+case mapping is its own entry, **§A.4** below.
+
 > `typeof undefined` (a former divergence) is now **supported** and matches node.
 
 ### 3. Pipeline operator `|>` (Elixir semantics, not TC39 Hack-style)
@@ -2743,6 +3003,69 @@ twin-file strategy (`test/pipeline/*.ts` + hand-desugared `*.twin.ts`, gated by
 `test/pipeline.test.ts`) keeps a defined node oracle. If a Hack-style `|>` ever ships in
 standard JS/TS, our `|>` will diverge from conforming TS (same token, different lowering) — this
 entry is that pre-registered divergence.
+
+### 4. `toUpperCase` / `toLowerCase` map U+0000–U+017F; above that they are the identity
+
+`toUpperCase` and `toLowerCase` are **exact** for every code point up to **U+017F** — ASCII,
+Latin-1 Supplement, and Latin Extended-A. From **U+0180 up** — Latin Extended-B, IPA, Greek,
+Cyrillic, Armenian, Georgian, Latin Extended Additional, and the rest — a character is
+returned **unchanged**, where node maps it:
+
+```ts
+"é".toUpperCase()   // "É"    — covered, matches node
+"straße".toUpperCase()  // "STRASSE" — covered, matches node
+"αβγ".toUpperCase() // "αβγ"  — node gives "ΑΒΓ"        ← the divergence
+"да".toUpperCase()  // "да"   — node gives "ДА"         ← the divergence
+```
+
+**Why the line is here and not further out.** `runtime/` is **libc-only** so it cross-links
+to macOS, Linux, iOS, Android, Windows and wasm. That rules out two otherwise-obvious
+implementations:
+
+- **`toupper`/`towupper` are locale-dependent.** The answer would vary with the environment
+  the binary happens to run in, so the same program would print different bytes on two
+  machines. A divergence that is *stable and documented* is worth more than one that is
+  merely smaller but unpredictable, and an environment-dependent answer cannot be tested
+  against a fixed oracle at all.
+- **The full tables do not fit the constraint.** 2981 code points are cased. Beyond their
+  size, `Default Case Conversion` is not a pure per-character function: it has
+  **context-sensitive** rules (final sigma — `Σ` lowercases to `ς` word-finally and `σ`
+  elsewhere) and **locale-sensitive** ones (Turkish/Azeri dotted and dotless `i`, Lithuanian
+  retained dots). A `const char *` in, `const char *` out, with no locale argument, cannot
+  express either. Implementing the table but not the conditions would be a *wrong* whole,
+  which is worse than a *correct* part.
+
+**What the covered range buys.** Those 360 cased code points collapse to six arithmetic
+rules per direction plus eight exceptions, so the whole thing is exact in ~40 lines with no
+tables at all. It also includes the five **length-changing** unconditional mappings, which
+are the ones an implementation is most likely to get wrong:
+
+| mapping | | note |
+|---|---|---|
+| `ß` U+00DF → `SS` | upper | one character becomes two |
+| `ŉ` U+0149 → `ʼN` | upper | 2 bytes → 3 |
+| `İ` U+0130 → `i` + U+0307 | lower | 2 bytes → 3 — the worst growth ratio, 1.5x |
+| `ı` U+0131 → `I` | upper | 2 bytes → 1 |
+| `ſ` U+017F → `S` | upper | 2 bytes → 1 |
+| `µ` U+00B5 → `Μ` U+039C | upper | leaves the block entirely (into Greek) |
+
+Because of these, neither method can work **in place** or size its output from its input;
+both measure the result with the same mapper that fills it.
+
+**Uncovered input is never damaged, including ill-formed UTF-8.** No decoder is involved:
+the covered range is *self-identifying* in UTF-8 (one byte below 0x80, or two bytes with a
+lead in `0xC2..0xC5` and a real continuation byte after it), so any byte that does not begin
+a covered scalar is copied through singly and longer sequences reassemble untouched. That
+matters more than it sounds, because §A.2 makes ill-formed UTF-8 **reachable from ordinary
+source**: `.slice` cuts bytes, so `"é".slice(0, 1)` is a lone lead byte. `("é".slice(0, 1) +
+"A").toLowerCase()` keeps the stray lead byte as-is and lowers the `A` — it does not re-frame
+the pair into `Á` and eat the `A`, and it does not substitute U+FFFD.
+
+**Tested by** `test/case-mapping.test.ts`: every code point in U+0001–U+017F swept against
+node in both directions, every code point in U+0180–U+FFFF asserted byte-identical (the
+regression test for *this* entry — it fails the day the range widens without this section
+widening), the growth cases built under `-fsanitize=address`, and the half-character slice
+above pinned at the byte level.
 
 ### Template-literal TYPES parse and erase to `string` — the pattern is NOT enforced
 
@@ -3223,11 +3546,11 @@ that ends at zero because its frame exited proves nothing) and an ASan run with
 `sanitize_address` asserted present on the `define`s — on macOS LeakSanitizer does not exist,
 so use-after-free and double-free are the two faults a sanitizer can actually see here.
 
-##### OPEN BUG: an IN-FRAME `throw` of a local declared OUTSIDE the `try` double-frees
+##### CLOSED: an IN-FRAME `throw` of a local declared OUTSIDE the `try` double-freed
 
 The move above is the CROSS-FRAME path. The in-frame path — a `throw` lowered as a branch to
-the enclosing `catch` — does not move, and where the thrown value is a linear local declared
-outside the `try`, two owners free one block:
+the enclosing `catch` — did not move, and where the thrown value is a linear local declared
+outside the `try`, two owners freed one block:
 
 ```ts
 class E { message: string; code: number; constructor(m: string, c: number) { this.message = m; this.code = c; } }
@@ -3237,19 +3560,20 @@ function run(n: number): number {
 }
 ```
 
-node prints `190` for a loop of 20; nativets **exits 133 with no output and no diagnostic**.
-The handler emits `nt_obj_free` twice on the same pointer — once for the catch binding (an
-owner since the `TryStmt` case in `src/ownership.ts`) and once for `err` (still an owner).
-Present at `47b28d2`, i.e. it predates the move work and is unchanged by it.
+node printed `190` for a loop of 20; nativets **exited 133 with no output and no diagnostic**
+(exit 255 through the test harness). The handler emitted `nt_obj_free` twice on the same
+pointer — once for the catch binding (an owner since the `TryStmt` case in
+`src/ownership.ts`) and once for `err` (still an owner). Present at `47b28d2`, i.e. it
+predated the move work and was unchanged by it.
 
-**The one-word fix does not work, and the reason is a SECOND open bug.** Making the `throw`
-consuming (`this.expr(s.argument, state, true)`) does fix it — the existing conditional-drop
+**The one-word fix needed a SECOND fix first, and the two shipped together.** Making the
+`throw` consuming (`this.expr(s.argument, state, true)`) fixes it — the conditional-drop
 machinery (`condDrops`/`moveSites`/`nullOnMove`) nulls the slot at the move site, so the
-second free is a no-op — but it also refuses `if (c) throw err; use(err);` as `NT1601`, on a
-program node runs: the ownership pass merges an `if` branch back into the state
-unconditionally, so a value moved on a TERMINATING path is seen as maybe-moved afterwards.
-That is not specific to `throw` — `return` is consuming today and has exactly the same false
-positive at `47b28d2`:
+second free is the no-op `nt_obj_free(NULL)` — but on its own it also refuses
+`if (c) throw err; use(err);` as `NT1601`, on a program node runs: the ownership pass merged
+an `if` branch back into the state unconditionally, so a value moved on a TERMINATING path
+was seen as maybe-moved afterwards. That was never specific to `throw` — `return` is
+consuming today and had exactly the same false positive at `47b28d2`:
 
 ```ts
 function pick(n: number): E {
@@ -3259,8 +3583,40 @@ function pick(n: number): E {
 }
 ```
 
-So both want the same change — a branch that `return`s or `throw`s must not merge its moved
-state back — and neither should be fixed without the other.
+**The rule that shipped.** An `if` arm or a `switch` case that LEAVES THE FRAME contributes
+nothing to the fall-through join, because that join is not a program point on any path
+through it (`Analyzer.escapes`, `src/ownership.ts`). Three conditions, each load-bearing:
+
+| condition | why it is there |
+|---|---|
+| `leavesFrame` — every path out of the arm is a `return`/`throw` | a LOOP body never counts however it ends: it may run zero times. An `if` counts only when BOTH arms diverge |
+| `hasJump` — no `break`/`continue` anywhere in the arm | those leave the BLOCK, not the frame. `for (…) { if (c) { const b = a; if (d) break; return 1; } } use(a);` looks diverging on the `return` and reaches `use(a)` down the `break` with `a` moved |
+| `tryDepth === 0` — not lexically inside a `try` | a `return` there runs the `finally` and a `throw` runs the `catch`; both read this state, and the catch/finally ENTRY state *is* the block's fall-through state, so there is nowhere else for the moves to be recorded |
+
+`break` and `continue` therefore still merge unconditionally, and that is a deliberate
+conservatism, not an oversight: `if (c) { const b = a; break; } … ; use(a)` after the loop
+is refused where node runs it. Relaxing them needs the dataflow to grow a second,
+EXCEPTIONAL state — the same split `src/checker.ts` already made for definite assignment
+(`DAExit`/`DAEscapes`, see "`break` is not `return`" above) — not a wider predicate. The
+same goes for the `try` guard.
+
+**One new refusal.** Reading the raised local FROM the handler is now `NT1601` where it used
+to compile and exit 255:
+
+```ts
+const err = new E("boom");
+try { if (n > 0) throw err; return 1; }
+catch (e) { return err.message.length; }   // node: 4. nativets: NT1601
+```
+
+To node `err` and `e` are one object; to us the raise MOVED the pointer to the handler's
+binding, so naming the raiser is a use-after-move. A refusal in place of a silent double
+free is the trade this project always takes. Read it through the catch binding (`e`).
+
+Pinned in `test/move-diverge.test.ts` — seven newly-accepted programs against node, five
+refusals that must stay refused (including both `break` shapes and the `finally` one),
+`__arrLive`/`__objLive`/`__strLive` at two scales 4x apart, and ASan builds with the
+`sanitize_address` attribute asserted present rather than assumed.
 
 The **stderr text divergence above applies to a propagated throw that nobody catches too**:
 it reaches `main`, and `main` prints one line and exits 1 where node prints a stack trace.
@@ -3838,6 +4194,58 @@ along with the requirement that the hint's own suggested fix compiles and matche
 widen `string` + `undefined` into `string | undefined`. The `if`/`return` spelling of the
 same function compiles.
 
+### `{ __proto__: v }` is refused (`NT1038`) — it is the prototype setter, and we have no prototypes
+
+```ts
+console.log(JSON.stringify({ __proto__: 1 }));                  // node: {}   nativets, before: {"__proto__":1}, exit 0
+console.log(Object.keys({ __proto__: 1, other: 2 }).join("|")); // node: other  nativets, before: __proto__|other
+```
+
+`__proto__` written as `PropertyName : AssignmentExpression` inside an object literal is not a
+property at all. ECMAScript **B.3.1** (*`__proto__` Property Names in Object Initializers*)
+rewrites that one production into a `[[SetPrototypeOf]]`, so the key never becomes an own
+property and never appears in `Object.keys`, `for-in`, `Object.values` or `JSON.stringify`. We
+built an ordinary field, printed it, and exited 0 — the silent-wrong-answer shape, found by the
+node-differential fuzz lane.
+
+**It is unimplementable here, not merely unimplemented.** A nativets object is a flat record
+whose slot layout is fixed at compile time from its static type, with no prototype link and no
+place to put one; class methods are resolved from the type tag rather than carried by the value.
+All three shapes of the setter need exactly the chain we do not have:
+
+| written | what node does | why we cannot |
+|---|---|---|
+| `{ __proto__: obj }` | `[[Prototype]] = obj` | a later `o.b` has to resolve on `obj` |
+| `{ __proto__: null }` | drops `Object.prototype` — `"toString" in o` turns **false** | our `in` answers from `OBJECT_PROTO_KEYS` (`src/ast.ts`), a compile-time list with no per-object exception |
+| `{ __proto__: 1 }` | a primitive is ignored — a pure no-op | *this one alone is expressible* (drop the key), but such a literal is an obfuscated `{}`, and compiling it would leave a value that is evaluated, owned by nobody and stored nowhere in the one path where every other property MOVES into the object |
+
+Refusing the production **whole** is both the honest answer and the only uniform one; limping
+through the third row would buy no real program and add a discarded-temporary case to the
+literal path. Note that node's third row is *also* where a would-be fix is most tempting and
+least useful.
+
+**Refused in the parser** (`parseObjectLiteral`), which is unusual for an `NT1xxx` and
+deliberate: it is the last point that still knows the production. The shorthand desugars to
+`{ key, value: Identifier(key) }`, which is indistinguishable downstream from
+`{ __proto__: __proto__ }` — and those two disagree in node.
+
+**Deliberately narrow — B.3.1 rewrites only that one production, so the neighbours are ordinary
+properties in node and still compile here, unchanged:**
+
+| spelling | node | nativets |
+|---|---|---|
+| `{ __proto__ }` shorthand | ordinary property (`IdentifierReference`, not `PropertyName :`) | **compiles, matches node** — this is what `NT1038`'s hint sends you to |
+| `{ ["__proto__"]: v }` | ordinary property | `NT0001` — computed keys are unsupported generally, not a wrong answer |
+| `JSON.parse('{"__proto__":1}')` | ordinary property (`CreateDataProperty`) | unaffected |
+| `"__proto__" in o` | `true` | `true` — `OBJECT_PROTO_KEYS` already lists it |
+
+**Still open, and NOT closed by this refusal:** `o.__proto__` as a member expression. In node
+that is the `Object.prototype` accessor pair, so a *read* yields the prototype and a *write*
+sets it — `o.__proto__ = {b:2}` creates no own property either. `docs/divergences.md`'s
+Record/dict section already records that `o["__proto__"]` answers an object. Both `{ __proto__ }`
+and every clause of `NT1038`'s hint were compiled and byte-diffed against node;
+`test/fuzz-diff.test.ts` holds the refusal contract and that proof.
+
 ### Host FFI (SH4) — `node:fs` / `node:child_process`
 
 A `node:` import binds a **compiler builtin**, not a file: there is no `node_modules`, no JS to
@@ -3906,6 +4314,32 @@ Only the one-argument string form exists. node's `(chunk, encoding?, callback?)`
 is node's own rule.
 
 | NT1028 | a `node:` builtin module, or a member of one, outside the implemented host FFI surface — and the ambient `process.stdout` members outside `.write(s)` | later | the surface is what a self-hosted compiler needs: `node:fs` (`readFileSync`/`writeFileSync`/`existsSync`), `node:child_process` (`spawnSync`), `process.stdout.write` |
+
+### `process.platform` — the TARGET's platform, and the one value node has no word for
+
+`process.platform` is a host builtin returning node's spelling for the platform the program
+is running on: `darwin`, `linux`, `win32`, `android`. On every platform node itself runs on
+this is **not** a divergence — `node file.ts` and our compiled binary print the same string,
+which is what `test/hostio/platform.ts` asserts differentially on whatever box runs it (so a
+Linux runner checks the branch a macOS laptop cannot).
+
+The interesting part is *when* it is resolved. For an AOT binary "the platform I am running
+on" **is** the platform I was built for, so the answer has to follow `--target`. It is
+therefore computed by the **C preprocessor** in `runtime/runtime.c` (`nt_platform`), not
+folded to a constant by codegen. That is forced by a rule this project keeps elsewhere: the
+emitted `.ll` deliberately carries **no target triple** so clang can retarget it, and
+`linkArgv` puts `-target` on the one clang command that compiles both the `.ll` and the
+runtime `.c`. Codegen runs once and cannot know the target; the preprocessor is told. Had we
+folded a constant, `nativets build --target linux` on a Mac would have produced a Linux ELF
+that reported `darwin` — a silent wrong answer, the worst outcome available.
+
+`__ANDROID__` is tested **before** `__linux__`, because Android defines both and node reports
+`android` there.
+
+**The actual divergence is `wasm` only.** No node build targets wasi, so there is no oracle to
+match, and a wasi binary reports **`wasi`** — a value node never produces. That is deliberate:
+guessing one of node's spellings (`linux`, say) would make a wrong answer *look* right. An
+unrecognized platform reports `unknown` for the same reason.
 
 ### Type declarations HOIST; recursive types are still not representable (NT1030)
 

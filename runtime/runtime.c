@@ -450,6 +450,67 @@ void nt_panic_bounds(const char *what, double len, double idx, const char *loc) 
   abort();
 }
 
+/* ============================================================
+ * PANIC — a string the host cannot represent (see docs/divergences.md).
+ *
+ * node's (V8's) maximum string length on 64-bit is 2^29-24; `"x".repeat(536870889)` is
+ * the first `RangeError: Invalid string length` (measured against node v24). We count
+ * UTF-8 BYTES where node counts UTF-16 code units — the pre-existing string-index
+ * divergence (A.2) — so the two boundaries coincide for ASCII and ours is the stricter
+ * one for anything wider.
+ *
+ * WHY A PANIC AND NOT A RAISE. node throws a CATCHABLE RangeError here, and the pending-
+ * exception protocol below could carry one. It deliberately does not: making these
+ * builders fallible would route every `.repeat` / `.padStart` / `.padEnd` call site
+ * through `emitExcCheck`, which REFUSES to compile a fallible call inside a `try` with no
+ * `catch`, and inside a `try` whose `catch` binds an object type. Those are ordinary
+ * formatting calls, so that trades a rare stop for a common REJECTION of programs that
+ * compile and run correctly today. This is the same policy the compiler already applies
+ * to every other unrecoverable size failure — `nativets: out of memory` and
+ * `nt_panic_bounds` — so there is one stop discipline, not two. stdout is flushed first,
+ * so everything printed before the fault stays byte-comparable with node; the exit code
+ * is 134 (SIGABRT) where node's is 1, documented in docs/divergences.md.
+ * ============================================================ */
+#define NT_MAX_STR_LEN 536870888.0
+
+static void nt_panic_str_len(const char *what, double want) {
+  char w[64];
+  js_number_to_string(want, w, sizeof(w));
+  fflush(stdout);
+  fprintf(stderr, "panic: invalid string length: %s would be %s bytes, past the %.0f-byte maximum\n",
+          what, w, NT_MAX_STR_LEN);
+  fprintf(stderr, "  help: node throws `RangeError: Invalid string length` at exactly this "
+                  "boundary; build the text in pieces, or write it out incrementally, instead "
+                  "of materialising one string this large\n");
+  fflush(stderr);
+  abort();
+}
+
+/* `.repeat(count)` rejects its COUNT before it ever looks at the length — ES 22.1.3.18
+ * step 3 — which is why `"".repeat(Infinity)` throws while `"".repeat(1e100)` is "". */
+static void nt_panic_repeat_count(double count) {
+  char c[64];
+  js_number_to_string(count, c, sizeof(c));
+  fflush(stdout);
+  fprintf(stderr, "panic: invalid count value: %s\n", c);
+  fprintf(stderr, "  help: `.repeat(n)` needs `n` to be finite and >= 0; node throws "
+                  "`RangeError: Invalid count value: %s` here\n", c);
+  fflush(stderr);
+  abort();
+}
+
+/* ES 7.1.5 ToIntegerOrInfinity, kept as a DOUBLE so ±Infinity SURVIVES the conversion.
+ * `(long)d` for a non-finite or out-of-range `d` is undefined in C, and the two hosts
+ * disagree in the worst possible way: arm64 saturates to LONG_MAX while x86-64 yields
+ * LONG_MIN. That one line made `"abc".padStart(Infinity, "xy")` abort on one target and
+ * silently answer `"abc"` on the other — a WRONG ANSWER at exit 0, from the same source,
+ * decided by the host. Every length argument below goes through here first. */
+static double nt_to_integer_or_infinity(double d) {
+  if (isnan(d)) return 0.0;
+  if (isinf(d)) return d;
+  return trunc(d);
+}
+
 /* `expr!` — TypeScript's non-null assertion, on an A2 tagged pair [tag, value]
  * (tag 0 = undefined, 1 = null, >=2 = present). Unwraps to the value slot.
  *
@@ -645,6 +706,11 @@ refuse:
 
 const char *js_str_concat(const char *a, const char *b) {
   size_t la = nt_strlen(a), lb = nt_strlen(b);
+  /* `+` shares the cap but NOT the overflow: both operands are strings already in memory,
+   * so `la + lb` cannot wrap. It can still step past what node can represent, and node
+   * raises `Invalid string length` there — so a concatenation that outgrows the maximum
+   * must stop rather than answer a string node would refuse to build. One compare. */
+  if ((double)la + (double)lb > NT_MAX_STR_LEN) nt_panic_str_len("the concatenation", (double)la + (double)lb);
   char *out = (char *)nativets_alloc(la + lb + 1);
   memcpy(out, a, la);
   memcpy(out + la, b, lb);
@@ -703,14 +769,120 @@ double js_shl(double a, double b)  { return (double)(to_int32(a)  << (to_uint32(
 double js_shr(double a, double b)  { return (double)(to_int32(a)  >> (to_uint32(b) & 31u)); }
 double js_ushr(double a, double b) { return (double)(to_uint32(a) >> (to_uint32(b) & 31u)); }
 
-/* Number(string) / unary + on string, matching JS ToNumber */
+/* StrWhiteSpace is the SAME set the trims use (ECMAScript WhiteSpace + LineTerminator),
+ * so `Number(x)` and `x.trim()` cannot disagree about what a blank string is. Defined
+ * further down next to js_str_trim; forward-declared here rather than moved, so the one
+ * canonical table stays where its comment explains it. */
+static const char *nt_ws_skip_fwd(const char *s, const char *end);
+static const char *nt_ws_skip_back(const char *start, const char *end);
+
+/* ---- StrDecimalLiteral — ECMA-262 7.1.4.1, the grammar `Number(string)` and
+ * `parseFloat` are both defined on. ------------------------------------------------
+ *
+ *     StrDecimalLiteral ::: [+-]opt StrUnsignedDecimalLiteral
+ *     StrUnsignedDecimalLiteral ::: Infinity
+ *                                 | DecimalDigits . DecimalDigits_opt ExponentPart_opt
+ *                                 | . DecimalDigits ExponentPart_opt
+ *                                 | DecimalDigits ExponentPart_opt
+ *
+ * `strtod` is NOT this grammar, and every place it is wider was a silent wrong answer:
+ * it accepts `inf` / `infinity` / `INFINITY` in ANY case where JS spells it exactly
+ * `Infinity` (so `Number("infinity")` handed back a finite-looking Infinity and the
+ * program kept running), and it accepts C99 hex floats, so `Number("0x1p3")` was 8
+ * where node says NaN. There is no hex form in StrDecimalLiteral at all, which is why
+ * `parseFloat("0x1f")` is 0 — it stops at the `x`.
+ *
+ * So the SHAPE is matched here and strtod is asked only for the VALUE, which is the
+ * part it is good at: correctly rounded, unlike any hand-rolled digit loop. The two
+ * ends then agree on where the literal stops in every case but one — a `0x`/`0X`
+ * prefix, which this grammar reads as the single digit `0` — and that one is answered
+ * without calling strtod at all.
+ *
+ * Returns the end of the match, or NULL when there is no StrDecimalLiteral at `s`. */
+static const char *nt_scan_decimal(const char *s, const char *limit, double *out) {
+  const char *p = s;
+  int neg = 0;
+  if (p < limit && (*p == '+' || *p == '-')) { neg = (*p == '-'); p++; }
+  if (limit - p >= 8 && memcmp(p, "Infinity", 8) == 0) {   /* exact case, no `inf` */
+    *out = neg ? -INFINITY : INFINITY;
+    return p + 8;
+  }
+  const char *ints = p;
+  while (p < limit && *p >= '0' && *p <= '9') p++;
+  int has_int = p > ints, has_frac = 0;
+  if (p < limit && *p == '.') {
+    const char *frac = ++p;
+    while (p < limit && *p >= '0' && *p <= '9') p++;
+    has_frac = p > frac;
+  }
+  if (!has_int && !has_frac) return NULL;   /* "", ".", "+", "e5" — no mantissa */
+  if (p < limit && (*p == 'e' || *p == 'E')) {
+    const char *q = p + 1;
+    if (q < limit && (*q == '+' || *q == '-')) q++;
+    const char *dig = q;
+    while (q < limit && *q >= '0' && *q <= '9') q++;
+    if (q > dig) p = q;                     /* a digitless `e` is simply not part of it */
+  }
+  /* The only place strtod would run PAST us: the match is exactly `0` and a hex float
+   * starts here. In this grammar that is the digit zero and the `x` is where it ends. */
+  if (p == ints + 1 && *ints == '0' && p < limit && (*p == 'x' || *p == 'X')) {
+    *out = neg ? -0.0 : 0.0;
+    return p;
+  }
+  *out = strtod(s, NULL);
+  return p;
+}
+
+/* NonDecimalIntegerLiteral — the `0b` / `0o` / `0x` prefixes. ES2015 added the first
+ * two to StringNumericLiteral; this runtime knew only `0x`, so `Number("0b101")` was
+ * NaN. A SIGN is not part of this production, which the old code also got wrong in the
+ * loud-to-silent direction: `Number("-0x10")` answered -16 where node says NaN.
+ *
+ * The digits fold into a 64-bit significand with a sticky low bit, scaled once by
+ * ldexp. Every radix here is a power of two, so that is a single rounding and a
+ * 300-digit hex string is as correctly rounded as a short one; `v = v * radix + d` in
+ * double would round at every step. Returns the end of the match, or NULL. */
+static const char *nt_scan_nondecimal(const char *s, const char *limit, double *out) {
+  int bits;
+  if (limit - s < 3 || s[0] != '0') return NULL;
+  switch (s[1]) {
+    case 'b': case 'B': bits = 1; break;
+    case 'o': case 'O': bits = 3; break;
+    case 'x': case 'X': bits = 4; break;
+    default: return NULL;
+  }
+  const char *p = s + 2, *first = p;
+  uint64_t mant = 0;
+  int shift = 0;                            /* bit places dropped below `mant` */
+  for (; p < limit; p++) {
+    unsigned c = (unsigned char)*p, v;
+    if (c >= '0' && c <= '9') v = c - '0';
+    else if (bits == 4 && c >= 'a' && c <= 'f') v = c - 'a' + 10;
+    else if (bits == 4 && c >= 'A' && c <= 'F') v = c - 'A' + 10;
+    else break;
+    if (v >= (1u << bits)) break;           /* `8` in an octal literal, `2` in a binary one */
+    /* `mant` full: the digit is entirely below the significand, so it can only set the
+     * sticky bit. `shift` STOPS at 65536 — anything at all is already Infinity by then,
+     * and letting a long enough literal overflow a signed int would be UB. */
+    if (mant >> (64 - bits)) { if (shift < 65536) shift += bits; if (v) mant |= 1; }
+    else mant = (mant << bits) | v;
+  }
+  if (p == first) return NULL;              /* `0x` with no digits after it */
+  *out = ldexp((double)mant, shift);
+  return p;
+}
+
+/* Number(string) / unary + on string — ToNumber applied to StringNumericLiteral:
+ * StrWhiteSpace on both sides, empty (or blank) is 0, and ANY trailing garbage is NaN. */
 double js_str_to_num(const char *s) {
-  while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') s++;
-  if (*s == '\0') return 0.0;
-  char *end;
-  double v = strtod(s, &end);
-  while (*end == ' ' || *end == '\t' || *end == '\n' || *end == '\r') end++;
-  return *end == '\0' ? v : NAN;
+  const char *end = s + nt_strlen(s);
+  const char *p = nt_ws_skip_fwd(s, end);
+  end = nt_ws_skip_back(p, end);
+  if (p == end) return 0.0;                 /* StrWhiteSpace only */
+  double v;
+  const char *q = nt_scan_nondecimal(p, end, &v);
+  if (q == NULL) q = nt_scan_decimal(p, end, &v);
+  return q == end ? v : NAN;
 }
 
 /* Math.round — ECMA-262 21.3.2.28, which is NOT `floor(x + 0.5)`.
@@ -792,11 +964,14 @@ double js_parse_int(const char *s, double radixd) {
   if (end == s) return NAN;
   return (double)(sign * v);
 }
+/* parseFloat is the LONGEST-PREFIX read of the same StrDecimalLiteral: trailing garbage
+ * is ignored rather than fatal, and the `0b`/`0o`/`0x` prefixes are NOT in this grammar
+ * (that is Number's extra production alone), so `parseFloat("0x1f")` is 0, not 31. */
 double js_parse_float(const char *s) {
-  while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') s++;
-  char *end;
-  double v = strtod(s, &end);
-  return end == s ? NAN : v;
+  const char *end = s + nt_strlen(s);
+  const char *p = nt_ws_skip_fwd(s, end);
+  double v;
+  return nt_scan_decimal(p, end, &v) ? v : NAN;
 }
 
 /* ---- string methods (byte-oriented; ASCII-correct) ---- */
@@ -806,16 +981,145 @@ double js_parse_float(const char *s) {
  * the pieces produced by nt_str_split). */
 static char *alloc_str(size_t n) { char *p = (char *)nativets_alloc(n + 1); nt_str_register(p); return p; }
 
-const char *js_str_upper(const char *s) {
-  size_t n = nt_strlen(s); char *o = alloc_str(n);
-  for (size_t i = 0; i < n; i++) o[i] = (s[i] >= 'a' && s[i] <= 'z') ? s[i] - 32 : s[i];
-  o[n] = 0; return o;
+/* ---- toUpperCase / toLowerCase over U+0000..U+017F ------------------------------
+ *
+ * These two used to be a byte-wise ASCII shift, so every non-ASCII letter came back
+ * UNMAPPED: `"é".toUpperCase()` returned `"é"` where node gives `"É"`. The bytes were
+ * well-formed UTF-8 either way — just the unmapped input — so nothing signalled the miss.
+ * A silent wrong answer, and docs/divergences.md §A.2 does not cover it: §A.2 is about
+ * the UNIT a string is MEASURED and SLICED in (our UTF-8 bytes vs node's UTF-16 code
+ * units), while this is about WHICH CHARACTER a character maps to. `é` -> `É` is two
+ * bytes to two bytes in either encoding.
+ *
+ * WHERE THE BOUNDARY IS, AND WHY (docs/divergences.md §A.4). `runtime/` is libc-only so
+ * it cross-links to macOS/Linux/iOS/Android/Windows/wasm. That rules out `towupper`,
+ * whose answer depends on the process LOCALE — the same program would print different
+ * bytes on two machines, which is worse than a documented gap. It also rules out the
+ * full Unicode case tables: 2981 code points are cased, plus the CONTEXT-sensitive rules
+ * (final sigma) and the LOCALE-sensitive ones (Turkish dotted/dotless i), none of which a
+ * `const char *` with no locale argument can even express.
+ *
+ * U+0000..U+017F — ASCII, Latin-1 Supplement, Latin Extended-A — is 360 of those code
+ * points and collapses to six arithmetic rules per direction plus eight exceptions, so it
+ * is EXACT at negligible size. From U+0180 up (Latin Extended-B, Greek, Cyrillic, …) the
+ * mapping is the IDENTITY here and differs from node.
+ *
+ * NO UTF-8 DECODER IS NEEDED, and that is the safety argument, not an optimization: the
+ * covered range is SELF-IDENTIFYING in UTF-8. U+0000..U+007F is one byte below 0x80;
+ * U+0080..U+017F is two bytes with a lead in 0xC2..0xC5. No continuation byte (0x80..0xBF)
+ * and no other lead byte can be mistaken for either, so any byte that does not begin a
+ * covered scalar is copied through ONE AT A TIME and a longer sequence reassembles itself
+ * untouched. Ill-formed input therefore passes through verbatim instead of being
+ * "corrected" into different bytes — the failure mode of a decoder that guesses. */
+
+/* Encode a BMP code point as UTF-8. Every mapping target below is < U+0800, but the
+ * three-byte arm is kept so this stays correct if the table ever grows. */
+static int nt_case_enc(unsigned cp, unsigned char *o) {
+  if (cp < 0x80) { o[0] = (unsigned char)cp; return 1; }
+  if (cp < 0x800) { o[0] = (unsigned char)(0xC0 | (cp >> 6)); o[1] = (unsigned char)(0x80 | (cp & 0x3F)); return 2; }
+  o[0] = (unsigned char)(0xE0 | (cp >> 12));
+  o[1] = (unsigned char)(0x80 | ((cp >> 6) & 0x3F));
+  o[2] = (unsigned char)(0x80 | (cp & 0x3F));
+  return 3;
 }
-const char *js_str_lower(const char *s) {
-  size_t n = nt_strlen(s); char *o = alloc_str(n);
-  for (size_t i = 0; i < n; i++) o[i] = (s[i] >= 'A' && s[i] <= 'Z') ? s[i] + 32 : s[i];
-  o[n] = 0; return o;
+
+/* The case mapping of ONE code point, UTF-8-encoded into `o` (at most 3 bytes).
+ * Returns the byte count, or 0 for "maps to itself" — which lets the caller copy the
+ * ORIGINAL bytes and so never re-encodes anything it did not deliberately change.
+ * `up` selects toUpperCase (1) or toLowerCase (0).
+ *
+ * The exceptions are tested FIRST because two of them sit inside an arithmetic range and
+ * would otherwise be swallowed by it: U+0131 `ı` is odd in U+0100..U+0137 (the pair rule
+ * would say U+0130, node says `I`), and U+0130 `İ` is even in the same run (the pair rule
+ * would say U+0131, node says `i` + COMBINING DOT ABOVE).
+ *
+ * Three of them are LENGTH-CHANGING, which is why neither of these functions can work in
+ * place or size its output from its input: `ß` -> `SS`, `ŉ` -> `ʼN`, `İ` -> `i` + U+0307
+ * all produce more characters than they consume, while `ı` -> `I` and `ſ` -> `S` produce
+ * fewer bytes. All five are the UNCONDITIONAL entries of SpecialCasing.txt; the
+ * conditional ones (final sigma, Lithuanian, Turkish) are out of scope by the paragraph
+ * above, and none of them has a source in this range. */
+static int nt_case_map(unsigned cp, int up, unsigned char *o) {
+  if (up) {
+    switch (cp) {
+      case 0x00B5: return nt_case_enc(0x039C, o);                 /* µ -> Μ (leaves the block) */
+      case 0x00DF: o[0] = 'S'; o[1] = 'S'; return 2;              /* ß -> SS */
+      case 0x00FF: return nt_case_enc(0x0178, o);                 /* ÿ -> Ÿ */
+      case 0x0131: o[0] = 'I'; return 1;                          /* ı -> I */
+      case 0x0149: { int k = nt_case_enc(0x02BC, o); o[k] = 'N'; return k + 1; } /* ŉ -> ʼN */
+      case 0x017F: o[0] = 'S'; return 1;                          /* ſ -> S */
+      default: break;
+    }
+    if (cp >= 0x61 && cp <= 0x7A) return nt_case_enc(cp - 0x20, o);              /* a-z */
+    if (cp >= 0xE0 && cp <= 0xFE && cp != 0xF7) return nt_case_enc(cp - 0x20, o); /* à-þ, not ÷ */
+    /* Latin Extended-A pairs. Three runs are (even = capital, odd = small) and one,
+     * U+0139..U+0148, is offset by one so the parity flips. U+0138 `ĸ` and U+0149 `ŉ`
+     * fall between runs and are caseless / handled above. */
+    if (cp >= 0x100 && cp <= 0x137 && (cp & 1)) return nt_case_enc(cp - 1, o);
+    if (cp >= 0x139 && cp <= 0x148 && !(cp & 1)) return nt_case_enc(cp - 1, o);
+    if (cp >= 0x14A && cp <= 0x177 && (cp & 1)) return nt_case_enc(cp - 1, o);
+    if (cp >= 0x179 && cp <= 0x17E && !(cp & 1)) return nt_case_enc(cp - 1, o);
+    return 0;
+  }
+  switch (cp) {
+    case 0x0130: { o[0] = 'i'; int k = nt_case_enc(0x0307, o + 1); return k + 1; } /* İ -> i̇ */
+    case 0x0178: return nt_case_enc(0x00FF, o);                                    /* Ÿ -> ÿ */
+    default: break;
+  }
+  if (cp >= 0x41 && cp <= 0x5A) return nt_case_enc(cp + 0x20, o);               /* A-Z */
+  if (cp >= 0xC0 && cp <= 0xDE && cp != 0xD7) return nt_case_enc(cp + 0x20, o); /* À-Þ, not × */
+  if (cp >= 0x100 && cp <= 0x137 && !(cp & 1)) return nt_case_enc(cp + 1, o);
+  if (cp >= 0x139 && cp <= 0x148 && (cp & 1)) return nt_case_enc(cp + 1, o);
+  if (cp >= 0x14A && cp <= 0x177 && !(cp & 1)) return nt_case_enc(cp + 1, o);
+  if (cp >= 0x179 && cp <= 0x17E && (cp & 1)) return nt_case_enc(cp + 1, o);
+  return 0;
 }
+
+/* Decode the covered scalar starting at `s[i]`, or report "not one of ours".
+ * Returns its byte length (1 or 2) and stores the code point; returns 0 for every other
+ * byte, which the caller then copies through singly. See the self-identifying argument
+ * in the block comment above. */
+static int nt_case_scalar(const unsigned char *s, size_t n, size_t i, unsigned *cp) {
+  if (s[i] < 0x80) { *cp = s[i]; return 1; }
+  if (s[i] >= 0xC2 && s[i] <= 0xC5 && i + 1 < n && (s[i + 1] & 0xC0) == 0x80) {
+    *cp = ((unsigned)(s[i] & 0x1F) << 6) | (unsigned)(s[i + 1] & 0x3F);
+    return 2;
+  }
+  return 0;
+}
+
+/* Two passes over the input, both driving the SAME mapper: the first sizes the output
+ * exactly, the second fills it. Sizing from the mapper rather than from a growth bound
+ * is deliberate — a mapping added to `nt_case_map` later cannot overrun a buffer that was
+ * measured by `nt_case_map` itself, whereas any "output is at most 1.5x the input" rule
+ * written here would silently stop being true. */
+static const char *nt_case_impl(const char *s, int up) {
+  const unsigned char *b = (const unsigned char *)s;
+  size_t n = nt_strlen(s);
+  unsigned char buf[4];
+  size_t out_n = 0;
+  for (size_t i = 0; i < n;) {
+    unsigned cp; int len = nt_case_scalar(b, n, i, &cp);
+    if (len == 0) { out_n += 1; i += 1; continue; }
+    int m = nt_case_map(cp, up, buf);
+    out_n += m ? (size_t)m : (size_t)len;
+    i += (size_t)len;
+  }
+  char *o = alloc_str(out_n);
+  size_t w = 0;
+  for (size_t i = 0; i < n;) {
+    unsigned cp; int len = nt_case_scalar(b, n, i, &cp);
+    if (len == 0) { o[w++] = (char)b[i]; i += 1; continue; }
+    int m = nt_case_map(cp, up, buf);
+    if (m) { memcpy(o + w, buf, (size_t)m); w += (size_t)m; }
+    else { memcpy(o + w, b + i, (size_t)len); w += (size_t)len; }
+    i += (size_t)len;
+  }
+  o[w] = 0; return o;
+}
+
+const char *js_str_upper(const char *s) { return nt_case_impl(s, 1); }
+const char *js_str_lower(const char *s) { return nt_case_impl(s, 0); }
 const char *js_str_char_at(const char *s, double id) {
   long n = (long)nt_strlen(s); long i = (long)id;
   if (i < 0 || i >= n) return nt_empty_str();
@@ -913,15 +1217,36 @@ static const char *nt_trim_impl(const char *s, int front, int back) {
 const char *js_str_trim(const char *s)       { return nt_trim_impl(s, 1, 1); }
 const char *js_str_trim_end(const char *s)   { return nt_trim_impl(s, 0, 1); }
 const char *js_str_trim_start(const char *s) { return nt_trim_impl(s, 1, 0); }
+/* String#repeat(count) — ES 22.1.3.18. The COUNT is validated first (step 3: a negative
+ * or +Infinity count is a RangeError whatever the receiver is), then the RESULT LENGTH.
+ *
+ * The size arithmetic is done in DOUBLE, not size_t, on purpose. `n * (size_t)count`
+ * wrapped: `"abcd".repeat(2**62)` is 2^64 bytes, which truncates to 0, so this allocated
+ * ONE byte and then memcpy'd 2^62 times into it — an out-of-bounds heap write in a
+ * memory-safe compiler, observed as SIGBUS with empty stdout AND empty stderr (the
+ * overflow had already smashed stdio's own buffer). A double holds every product up to
+ * the 2^29 cap exactly, so the comparison below is exact and cannot itself wrap. */
 const char *js_str_repeat(const char *s, double countd) {
-  long count = (long)countd; if (count < 0) count = 0;
-  size_t n = nt_strlen(s); char *o = alloc_str(n * (size_t)count);
-  for (long i = 0; i < count; i++) memcpy(o + i * n, s, n);
-  o[n * count] = 0; return o;
+  double count = nt_to_integer_or_infinity(countd);
+  if (count < 0.0 || isinf(count)) nt_panic_repeat_count(count);
+  size_t n = nt_strlen(s);
+  double total = (double)n * count;   /* exact for every value that survives the cap */
+  if (total > NT_MAX_STR_LEN) nt_panic_str_len("the repeated string", total);
+  size_t need = (size_t)total;        /* <= 2^29, so the narrowing is lossless */
+  char *o = alloc_str(need);
+  for (size_t i = 0; i < need; i += n) memcpy(o + i, s, n);
+  o[need] = 0; return o;
 }
+/* String#padStart(target, pad) — ES 22.1.3.17. Order matters and is node's: a target at
+ * or below the current length returns the receiver, THEN an empty filler returns the
+ * receiver (so `"abc".padStart(Infinity, "")` is `"abc"`, not a RangeError), and only
+ * then is the result length checked. */
 const char *js_str_pad_start(const char *s, double targetd, const char *pad) {
-  long target = (long)targetd; long n = (long)nt_strlen(s); size_t pn = nt_strlen(pad);
-  if (n >= target || pn == 0) { char *o = alloc_str((size_t)n); memcpy(o, s, n); o[n] = 0; return o; }
+  double t = nt_to_integer_or_infinity(targetd);
+  long n = (long)nt_strlen(s); size_t pn = nt_strlen(pad);
+  if (t <= (double)n || pn == 0) { char *o = alloc_str((size_t)n); memcpy(o, s, n); o[n] = 0; return o; }
+  if (t > NT_MAX_STR_LEN) nt_panic_str_len("the padded string", t);
+  long target = (long)t; /* <= 2^29 after the cap, so this conversion is defined */
   long padlen = target - n; char *o = alloc_str((size_t)target);
   for (long i = 0; i < padlen; i++) o[i] = pad[i % pn];
   memcpy(o + padlen, s, (size_t)n); o[target] = 0; return o;
@@ -1921,6 +2246,51 @@ const char *nt_getenv(const char *name) {
   return v ? v : "";
 }
 
+/* process.platform -> node's spelling for the platform this binary RUNS on.
+ *
+ * RESOLVED HERE, BY THE C PREPROCESSOR, AND THAT IS THE WHOLE POINT. For an AOT
+ * binary "the platform I am running on" IS the platform I was built for, and the
+ * emitted .ll deliberately carries no target triple so clang can retarget it
+ * (see the driver's `targetFlags`, which puts `-target` on the ONE clang command
+ * that compiles both the .ll and this file). Folding a constant in at codegen
+ * time would therefore bake the COMPILING host's platform into a
+ * cross-compiled binary — `nativets build --target linux` on a Mac would emit a
+ * Linux ELF that reports "darwin". Asking the preprocessor makes the answer
+ * follow `-target` for free, and keeps the IR triple-free.
+ *
+ * Returned as an untracked literal (never freed), like nt_getenv's result.
+ *
+ * ORDER MATTERS: Android defines __linux__ too, so it must be tested first, and
+ * node does report "android" there rather than "linux". */
+const char *nt_platform(void) {
+#if defined(__ANDROID__)
+  return "android";
+#elif defined(__APPLE__)
+  return "darwin";        /* macOS and iOS alike — node's spelling for both */
+#elif defined(_WIN32)
+  return "win32";         /* node says win32 on 64-bit Windows too */
+#elif defined(__linux__)
+  return "linux";
+#elif defined(__wasi__) || defined(__wasm__)
+  /* No node build targets wasi, so there is no oracle to match here. "wasi" is
+   * a deliberate divergence rather than a guess at one of node's spellings —
+   * see docs/divergences.md. */
+  return "wasi";
+#elif defined(__FreeBSD__)
+  return "freebsd";
+#elif defined(__OpenBSD__)
+  return "openbsd";
+#elif defined(_AIX)
+  return "aix";
+#elif defined(__sun)
+  return "sunos";
+#else
+  /* Deliberately not "unknown"-with-a-guess: an unrecognized platform is a
+   * porting task, and a wrong string here is a silent wrong answer. */
+  return "unknown";
+#endif
+}
+
 /* process.exit(code) — flushes stdio and exits (never returns). */
 void nt_exit(double code) { exit((int)code); }
 
@@ -2707,58 +3077,163 @@ double nt_date_now(void) {
 #endif
 }
 
-/* ---- base64 (btoa / atob) — pure byte ops over the string's bytes ---- */
+/* ---- base64 (btoa / atob) — the BINARY-STRING contract, not the byte buffer ----
+ *
+ * These used to be "pure byte ops over the string's bytes", and that is the one
+ * reading of them that is never right. `btoa`/`atob` are defined on a BINARY
+ * STRING: one CODE POINT per byte. A code point above U+00FF has no byte and is
+ * an `InvalidCharacterError`; it is not three UTF-8 bytes to encode. Ours encoded
+ * the UTF-8 (`btoa("é")` → `w6k=`, node `6Q==`) and, worse, answered `5L2g` at
+ * exit 0 for `btoa("你")`, which node REFUSES — a silent wrong answer on exactly
+ * the input whose whole point is which bytes come out.
+ *
+ * Our strings are UTF-8 (§A.2), so the code-point <-> byte mapping is the decode
+ * /encode pair below rather than a `memcpy`: `btoa` DECODES to code points and
+ * takes each one's single byte, and `atob` ENCODES each decoded byte back as the
+ * code point of that value. Both directions therefore agree with node's stdout
+ * BYTES, and `atob(btoa(s)) === s` holds for every `s` that `btoa` accepts.
+ *
+ * Both raise on the pending-exception slot (`nt_exc_raise_msg`), the same way
+ * `JSON.parse` and `decodeURIComponent` do, so codegen's `emitExcCheck` makes the
+ * throw catchable in a `try` in the same frame and exit 1 when it is not. */
 static const char B64_ENC[] =
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
+/* node names both failures `InvalidCharacterError`; the MESSAGE distinguishes a
+ * character outside the alphabet from a length that cannot be a base64 quantum. */
+static const char B64_ERR_CHAR[] = "InvalidCharacterError: Invalid character";
+static const char B64_ERR_LEN[] =
+  "InvalidCharacterError: The string to be decoded is not correctly encoded.";
+
+/* Decode ONE scalar of strict UTF-8 at s[*i..n); advance *i and return the code
+ * point, or return -1 for a truncated, overlong or otherwise malformed sequence.
+ * A lone surrogate (WTF-8, what the lexer and `String.fromCharCode` emit for
+ * `\ud800`) decodes as ITSELF — above U+00FF either way, so `btoa` refuses it
+ * exactly as node does. A malformed sequence is U+FFFD in node's string, also
+ * above U+00FF, so mapping it to -1 here reaches node's answer for its reason. */
+static long utf8_next(const unsigned char *s, size_t n, size_t *i) {
+  unsigned char c = s[*i];
+  if (c < 0x80) { (*i)++; return (long)c; }
+  size_t need;
+  long cp, min;
+  if ((c & 0xE0) == 0xC0) { need = 1; cp = c & 0x1F; min = 0x80; }
+  else if ((c & 0xF0) == 0xE0) { need = 2; cp = c & 0x0F; min = 0x800; }
+  else if ((c & 0xF8) == 0xF0) { need = 3; cp = c & 0x07; min = 0x10000; }
+  else return -1; /* a continuation byte or 0xF8..0xFF as a lead */
+  if (*i + need >= n) return -1; /* truncated */
+  for (size_t k = 1; k <= need; k++) {
+    unsigned char cc = s[*i + k];
+    if ((cc & 0xC0) != 0x80) return -1;
+    cp = (cp << 6) | (long)(cc & 0x3F);
+  }
+  if (cp < min || cp > 0x10FFFF) return -1; /* overlong, or out of range */
+  *i += need + 1;
+  return cp;
+}
+
 const char *nt_btoa(const char *s) {
-  size_t n = strlen(s);
-  size_t outlen = ((n + 2) / 3) * 4;
+  size_t n = nt_strlen(s);
+  const unsigned char *u = (const unsigned char *)s;
+  /* One code point is at least one input byte, so n bytes is always enough. */
+  unsigned char *bin = (unsigned char *)nativets_alloc(n + 1);
+  size_t m = 0, i = 0;
+  while (i < n) {
+    long cp = utf8_next(u, n, &i);
+    if (cp < 0 || cp > 0xFF) {
+      free(bin); /* unregistered scratch — `nt_str_register` never saw it */
+      nt_exc_raise_msg(B64_ERR_CHAR);
+      return nt_empty_str();
+    }
+    bin[m++] = (unsigned char)cp;
+  }
+  size_t outlen = ((m + 2) / 3) * 4;
   char *o = alloc_str(outlen);
   size_t j = 0;
-  for (size_t i = 0; i < n; i += 3) {
-    unsigned b0 = (unsigned char)s[i];
-    unsigned b1 = (i + 1 < n) ? (unsigned char)s[i + 1] : 0;
-    unsigned b2 = (i + 2 < n) ? (unsigned char)s[i + 2] : 0;
+  for (size_t k = 0; k < m; k += 3) {
+    unsigned b0 = bin[k];
+    unsigned b1 = (k + 1 < m) ? bin[k + 1] : 0;
+    unsigned b2 = (k + 2 < m) ? bin[k + 2] : 0;
     o[j++] = B64_ENC[b0 >> 2];
     o[j++] = B64_ENC[((b0 & 3) << 4) | (b1 >> 4)];
-    o[j++] = (i + 1 < n) ? B64_ENC[((b1 & 15) << 2) | (b2 >> 6)] : '=';
-    o[j++] = (i + 2 < n) ? B64_ENC[b2 & 63] : '=';
+    o[j++] = (k + 1 < m) ? B64_ENC[((b1 & 15) << 2) | (b2 >> 6)] : '=';
+    o[j++] = (k + 2 < m) ? B64_ENC[b2 & 63] : '=';
   }
   o[outlen] = 0;
+  free(bin);
   return o;
 }
 
-static int b64_val(char c) {
+static int b64_val(unsigned char c) {
   if (c >= 'A' && c <= 'Z') return c - 'A';
   if (c >= 'a' && c <= 'z') return c - 'a' + 26;
   if (c >= '0' && c <= '9') return c - '0' + 52;
   if (c == '+') return 62;
   if (c == '/') return 63;
-  return -1; /* '=' , whitespace, or invalid — skipped */
+  return -1; /* NOT skipped any more — this is what makes the input invalid */
 }
 
+/* The five ASCII whitespace code points the WHATWG infra spec strips, and only
+ * those. VT (0x0B) is NOT one of them — node throws on `atob("YQ==")`. */
+static int b64_space(unsigned char c) {
+  return c == 0x09 || c == 0x0A || c == 0x0C || c == 0x0D || c == 0x20;
+}
+
+/* WHATWG "forgiving-base64 decode". Ours used to skip every non-alphabet byte,
+ * so `atob("YQ===")` returned "a" and `atob("!!!!")` returned "" where node
+ * throws — untrusted input decoding to a plausible answer at exit 0.
+ *
+ * The order of the two failures is node's, not the spec's literal step order:
+ * the spec returns one undifferentiated failure, and node reports a stray `=`
+ * (`"YQ==="`, `"A==="`) as "Invalid character" even though its length ALSO
+ * leaves a remainder of 1 — so the alphabet check runs first and only an
+ * all-alphabet string of length %4 == 1 (`"Y"`, `"AAAAA"`) gets the length
+ * message. Verified against node 24 for both. */
 const char *nt_atob(const char *s) {
-  size_t n = strlen(s);
-  char *o = alloc_str(n); /* decoded length is always <= encoded length */
-  size_t j = 0;
-  int quad[4], qi = 0;
-  for (size_t i = 0; i < n; i++) {
-    int v = b64_val(s[i]);
-    if (v < 0) continue;
-    quad[qi++] = v;
-    if (qi == 4) {
-      o[j++] = (char)((quad[0] << 2) | (quad[1] >> 4));
-      o[j++] = (char)(((quad[1] & 15) << 4) | (quad[2] >> 2));
-      o[j++] = (char)(((quad[2] & 3) << 6) | quad[3]);
-      qi = 0;
+  size_t n = nt_strlen(s);
+  const unsigned char *u = (const unsigned char *)s;
+  unsigned char *in = (unsigned char *)nativets_alloc(n + 1);
+  size_t m = 0;
+  for (size_t i = 0; i < n; i++) if (!b64_space(u[i])) in[m++] = u[i];
+  /* Trailing padding is removed only from a well-sized string; that is why
+   * `"AA=="` decodes and `"A==="` (which strips to `"A="`) does not. */
+  if (m % 4 == 0) for (int p = 0; p < 2 && m > 0 && in[m - 1] == '='; p++) m--;
+  for (size_t i = 0; i < m; i++) {
+    if (b64_val(in[i]) < 0) {
+      free(in);
+      nt_exc_raise_msg(B64_ERR_CHAR);
+      return nt_empty_str();
     }
   }
-  if (qi >= 2) {
-    o[j++] = (char)((quad[0] << 2) | (quad[1] >> 4));
-    if (qi >= 3) o[j++] = (char)(((quad[1] & 15) << 4) | (quad[2] >> 2));
+  if (m % 4 == 1) {
+    free(in);
+    nt_exc_raise_msg(B64_ERR_LEN);
+    return nt_empty_str();
+  }
+  /* Each decoded byte is a code point, so it costs up to TWO UTF-8 bytes out —
+   * `atob("/w==")` is U+00FF, which node prints as C3 BF and we used to print as
+   * the bare FF, i.e. as stdout that is not valid UTF-8 at all. */
+  char *o = alloc_str(2 * m + 2);
+  size_t j = 0;
+  for (size_t i = 0; i + 1 < m; i += 4) {
+    unsigned v0 = (unsigned)b64_val(in[i]), v1 = (unsigned)b64_val(in[i + 1]);
+    unsigned v2 = (i + 2 < m) ? (unsigned)b64_val(in[i + 2]) : 0;
+    unsigned v3 = (i + 3 < m) ? (unsigned)b64_val(in[i + 3]) : 0;
+    unsigned bytes[3];
+    bytes[0] = ((v0 << 2) | (v1 >> 4)) & 0xFF;
+    bytes[1] = (((v1 & 15) << 4) | (v2 >> 2)) & 0xFF;
+    bytes[2] = (((v2 & 3) << 6) | v3) & 0xFF;
+    /* A remainder of 2 carries one byte and a remainder of 3 carries two; the
+     * leftover low bits of the last symbol are DISCARDED, not required to be
+     * zero (node decodes "YR==" to "a" exactly as it decodes "YQ=="). */
+    size_t take = (i + 3 < m) ? 3 : (i + 2 < m ? 2 : 1);
+    for (size_t k = 0; k < take; k++) {
+      unsigned b = bytes[k];
+      if (b < 0x80) { o[j++] = (char)b; }
+      else { o[j++] = (char)(0xC0 | (b >> 6)); o[j++] = (char)(0x80 | (b & 0x3F)); }
+    }
   }
   o[j] = 0;
+  free(in);
   return o;
 }
 
@@ -3069,8 +3544,11 @@ const char *js_str_at(const char *s, double id) {
  * repetition, and a no-op when the string is already long enough or the pad is
  * empty (node's semantics exactly). */
 const char *js_str_pad_end(const char *s, double targetd, const char *pad) {
-  long target = (long)targetd; long n = (long)nt_strlen(s); size_t pn = nt_strlen(pad);
-  if (n >= target || pn == 0) { char *o = alloc_str((size_t)n); memcpy(o, s, (size_t)n); o[n] = 0; return o; }
+  double t = nt_to_integer_or_infinity(targetd);
+  long n = (long)nt_strlen(s); size_t pn = nt_strlen(pad);
+  if (t <= (double)n || pn == 0) { char *o = alloc_str((size_t)n); memcpy(o, s, (size_t)n); o[n] = 0; return o; }
+  if (t > NT_MAX_STR_LEN) nt_panic_str_len("the padded string", t);
+  long target = (long)t; /* <= 2^29 after the cap, so this conversion is defined */
   char *o = alloc_str((size_t)target);
   memcpy(o, s, (size_t)n);
   for (long i = n; i < target; i++) o[i] = pad[(size_t)(i - n) % pn];

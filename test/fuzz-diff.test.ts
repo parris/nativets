@@ -95,7 +95,7 @@ describe("fuzz findings — string → number conversions", () => {
    * reads `"0x1f"` as the decimal `0` and stops at the `x`. Ours runs the `Number()` scanner
    * and returns 31.
    */
-  it.failing("parseFloat does not accept a hex prefix", async () => {
+  it("parseFloat does not accept a hex prefix", async () => {
     await expectSameBytes([
       'console.log(parseFloat("0x1f"));',     // node 0, ours 31
       'console.log(parseFloat("0x10"));',     // node 0, ours 16
@@ -108,7 +108,7 @@ describe("fuzz findings — string → number conversions", () => {
    * The mirror image: `Number(string)` IS defined on StrNumericLiteral, which since ES2015
    * includes the `0b`/`0o` prefixes. Ours knows `0x` and not the other two.
    */
-  it.failing("Number() accepts the 0b / 0o prefixes", async () => {
+  it("Number() accepts the 0b / 0o prefixes", async () => {
     await expectSameBytes([
       'console.log(Number("0b101"));',  // node 5,  ours NaN
       'console.log(Number("0o17"));',   // node 15, ours NaN
@@ -124,7 +124,7 @@ describe("fuzz findings — string → number conversions", () => {
    * `Infinity`. Ours matches case-insensitively, so a string that node reads as NaN becomes
    * a finite-looking Infinity here — the direction that keeps a bad program running.
    */
-  it.failing("Number()/parseFloat() only accept the exact spelling `Infinity`", async () => {
+  it("Number()/parseFloat() only accept the exact spelling `Infinity`", async () => {
     await expectSameBytes([
       'console.log(Number("infinity"));',      // node NaN, ours Infinity
       'console.log(Number("INFINITY"));',      // node NaN, ours Infinity
@@ -141,7 +141,7 @@ describe("fuzz findings — string → number conversions", () => {
    * specifically in whatever decides "this string is blank, therefore 0". Pure ASCII, so it
    * is independent of the UTF-8 byte-orientation divergence (§A.2).
    */
-  it.failing("Number() treats a whitespace-only vertical tab as 0", async () => {
+  it("Number() treats a whitespace-only vertical tab as 0", async () => {
     await expectSameBytes([
       'console.log(Number("\\u000b"));',    // node 0, ours NaN
       'console.log(Number("\\u000b\\u000b"));', // node 0, ours NaN
@@ -211,15 +211,78 @@ describe("fuzz findings — the lexer's escape table", () => {
 
 describe("fuzz findings — object literals", () => {
   /*
-   * In node `__proto__:` in an object LITERAL is the prototype setter, not a data property:
-   * the key never appears in `Object.keys`, `JSON.stringify` or `Object.values`. Here it is
-   * an ordinary key. Ranked low — node's behaviour is the surprising one and the shape is
-   * rare — but it is undocumented, and the prime directive is node.
+   * In node `__proto__:` in an object LITERAL is the prototype setter (B.3.1
+   * `__proto__` Property Names in Object Initializers), not a data property: the key never
+   * appears in `Object.keys`, `JSON.stringify` or `Object.values`. Here it was an ordinary
+   * key — a silent wrong answer at exit 0.
+   *
+   * It is NOT fixable. The setter's whole job is to install a PROTOTYPE, and nativets has no
+   * prototype chain: an object is a flat record with a fixed slot layout decided at compile
+   * time from its static type. The three shapes the setter takes all need the chain:
+   *   `{ __proto__: obj }`  — `o.b` must resolve on `obj`;
+   *   `{ __proto__: null }` — the object LOSES `Object.prototype`, so `"toString" in o` turns
+   *                           false, and our `in` answers that from a compile-time key list;
+   *   `{ __proto__: 1 }`    — a primitive is a no-op, so this one *is* expressible (drop the
+   *                           key) but it is an obfuscated `{}`; special-casing it would buy
+   *                           nothing and put a discarded, unowned value in the literal path.
+   * So the whole construct is refused (NT1038) rather than compiled three ways. This is the
+   * documented refusal in docs/divergences.md; the two tests below are its contract.
    */
-  it.failing("`__proto__` in an object literal is the prototype setter", async () => {
+  it("`__proto__` as a literal object-literal key is refused, not miscompiled", async () => {
+    // Every non-shorthand spelling of the key, including the ones we could have limped
+    // through: identifier, string, self-named value, object value, null value.
+    for (const stmt of [
+      'console.log(JSON.stringify({ "__proto__": 1 }));',
+      "console.log(JSON.stringify({ __proto__: 1 }));",
+      'console.log(Object.keys({ "__proto__": 1, other: 2 }).join("|"));',
+      "console.log(JSON.stringify({ __proto__: { b: 2 }, a: 1 }));",
+      "console.log(JSON.stringify({ __proto__: null, a: 1 }));",
+      "const __proto__ = 7;\nconsole.log(JSON.stringify({ __proto__: __proto__ }));",
+    ]) {
+      const r = await ourRun(`${stmt}\n`);
+      if (!isRefusal(r)) throw new Error(`compiled instead of refusing:\n${stmt}`);
+      expect({ stmt, nt1038: r.refused.includes("NT1038") }).toEqual({ stmt, nt1038: true });
+    }
+  });
+
+  /*
+   * The hint's advice, compiled against node. NT1038 says the SHORTHAND `{ __proto__ }` is an
+   * ordinary property — B.3.1 only rewrites `PropertyName : AssignmentExpression`, so
+   * `IdentifierReference` shorthand is untouched, and node really does keep the key. If that
+   * claim were wrong the diagnostic would be sending people at a second wrong answer.
+   */
+  it("the NT1038 hint is true: shorthand `{ __proto__ }` IS an ordinary property", async () => {
     await expectSameBytes([
-      'console.log(JSON.stringify({ "__proto__": 1 }));',                 // node {}, ours {"__proto__":1}
-      'console.log(Object.keys({ "__proto__": 1, other: 2 }).join("|"));', // node other, ours __proto__|other
+      "const __proto__ = 7;",
+      "console.log(JSON.stringify({ __proto__ }));",          // node {"__proto__":7}
+      'console.log(Object.keys({ __proto__, other: 2 }).join("|"));', // node __proto__|other
+      "",
+    ].join("\n"));
+  });
+
+  /*
+   * A NUMERIC key is taken as its RAW SOURCE TEXT. `expectKey` (src/parser.ts) returns the
+   * number token's spelling straight through, but a `PropertyName` that is a `NumericLiteral`
+   * is `ToString(ToNumber(literal))` — the key is the number's canonical form, not the digits
+   * that were typed. So node's `{ 1e3: "x" }` has the key `1000` and ours has `1e3`.
+   *
+   * Found while refusing `__proto__` above: the same one-line `expectKey` feeds both, and this
+   * is the same failure shape — a key that is a plausible string, so `JSON.stringify` and
+   * `Object.keys` both print something well-formed and exit 0.
+   *
+   * The canonical spellings are already right (`{1: …}`, `{0.5: …}`), which is exactly why
+   * this hid: only a NON-canonical literal witnesses it, and the fix is `ToString(ToNumber(…))`
+   * on the token — the `numToStr` that `test/numtostr.test.ts` already pins, reused here.
+   */
+  it.failing("a numeric object-literal key is ToString(ToNumber(…)), not its source text", async () => {
+    await expectSameBytes([
+      'console.log(Object.keys({ 1: "p", 2: "q" }).join("|"));', // node 1|2, ours 1|2 — correct
+      'console.log(Object.keys({ 1e3: "x" }).join("|"));',       // node 1000,  ours 1e3
+      'console.log(Object.keys({ 1.0: "y" }).join("|"));',       // node 1,     ours 1.0
+      'console.log(Object.keys({ 0x10: "z" }).join("|"));',      // node 16,    ours 0x10
+      'console.log(Object.keys({ 1e21: "w" }).join("|"));',      // node 1e+21, ours 1e21
+      'console.log(Object.keys({ 0.5: "v" }).join("|"));',       // node 0.5,   ours 0.5 — correct
+      'console.log(JSON.stringify({ 1e3: "x" }));',              // node {"1000":"x"}
       "",
     ].join("\n"));
   });
@@ -235,7 +298,7 @@ describe("fuzz findings — object literals", () => {
    * strings and must stay where they were written. Any fix that sorts "anything numeric-ish"
    * would break the second half.
    */
-  it.failing("array-index keys enumerate first, in ascending numeric order", async () => {
+  it("array-index keys enumerate first, in ascending numeric order", async () => {
     await expectSameBytes([
       'const o = { b: 1, a: 2, "10": 3, "2": 4 };',
       "console.log(JSON.stringify(Object.keys(o)));",   // node ["2","10","b","a"]
@@ -256,8 +319,48 @@ describe("fuzz findings — base64", () => {
    * plausible-looking answer at exit 0. This is §A.2's byte orientation reaching a function
    * whose whole contract is about which bytes those are, and §A.2 does not cover it.
    */
-  it.failing("btoa is Latin-1, and rejects a code point above U+00FF", async () => {
+  it("btoa is Latin-1, and rejects a code point above U+00FF", async () => {
     await expectSameBytes('console.log(btoa("\\u00e9"));\n'); // node 6Q==, ours w6k=
+  });
+
+  /*
+   * The whole U+0000..U+00FF byte range, in one program, both directions. NUL is excluded
+   * from the sweep on purpose: our strings are NUL-TERMINATED, so a NUL inside one is a
+   * pre-existing representation limit (a NUL in a LITERAL is already `NT1705`), not
+   * something this pair can decide — see the `btoa("a\0b")` note below.
+   */
+  it("btoa/atob round-trip every byte U+0001..U+00FF", async () => {
+    await expectSameBytes([
+      'let acc = "";',
+      "for (let i = 1; i <= 255; i++) { acc = acc + String.fromCharCode(i); }",
+      "const enc = btoa(acc);",
+      "console.log(enc);",
+      "console.log(enc.length);",
+      "console.log(atob(enc) === acc);",
+      // The high half alone — every one of these decodes to a 2-byte UTF-8 sequence on
+      // stdout, which is where the raw-byte compare earns its keep.
+      'console.log(atob("gIGC/f7/"));',
+      "",
+    ].join("\n"));
+  });
+
+  /* Above U+00FF there IS no byte, so node throws — including for a lone surrogate,
+   * which is a code point in the string and not a character in any encoding. One program,
+   * so the first throw does not hide the other four; the UNCAUGHT exit code is proved
+   * separately below (the handler must not be what makes these agree). */
+  it("btoa throws above U+00FF, for a BMP char and for a lone surrogate", async () => {
+    await expectSameBytes([
+      ...["\\u0100", "\\u4f60", "\\ud800", "\\udfff", "\\uffff", "\\u00ff", "\\u007f"].map(
+        (lit) => `try { console.log(btoa("${lit}")); } catch (e: string) { console.log("threw"); }`,
+      ),
+      "",
+    ].join("\n"));
+  });
+
+  /* The uncaught arm: stdout stops where node's stops, and the exit code is node's 1. */
+  it("an uncaught btoa/atob throw exits 1 with node's stdout", async () => {
+    await expectSameBytes('console.log("before");\nconsole.log(btoa("\\u4f60"));\nconsole.log("unreachable");\n');
+    await expectSameBytes('console.log("before");\nconsole.log(atob("!!!!"));\nconsole.log("unreachable");\n');
   });
 
   /*
@@ -265,7 +368,7 @@ describe("fuzz findings — base64", () => {
    * InvalidCharacterError. Ours accepts all three and returns a decoded string — the
    * silent-wrong-answer direction on untrusted input.
    */
-  it.failing("atob rejects malformed input instead of decoding it", async () => {
+  it("atob rejects malformed input instead of decoding it", async () => {
     const src = 'console.log(atob("YQ==="));\nconsole.log("after");\n';
     const oracle = nodeRun(src);
     const ours = await ourRun(src);
@@ -273,15 +376,91 @@ describe("fuzz findings — base64", () => {
     expect(oracle.exitCode).toBe(1); // node throws
     expect(ours.exitCode).toBe(oracle.exitCode); // ours exits 0 having printed "a"
   });
+
+  /* Every rejected shape, in one program, each behind its own handler so the first throw
+   * does not mask the rest. `"AAAAA"` and `"Y"` are the LENGTH failure (all-alphabet,
+   * %4 == 1); the others are the CHARACTER failure — including `"A==="`, whose two
+   * strippable `=` leave a third, and `"\v"`, which is NOT one of the five ASCII
+   * whitespace code points forgiving-base64 strips. The trailing three are accepted, so
+   * this table also pins where the boundary is rather than only that there is one. */
+  it("atob rejects each malformed shape, and node's stdout for it", async () => {
+    const shapes = ["YQ===", "!!!!", "YQ=", "Y", "=", "AAAAA", "YQ==X", "YQ=X=", "A===",
+                    "====", "-_", "\\u00e9", "\\u000bYQ==", "YQ==", "YQ", ""];
+    await expectSameBytes([
+      ...shapes.map((lit) => `try { console.log("[" + atob("${lit}") + "]"); } catch (e: string) { console.log("threw"); }`),
+      "",
+    ].join("\n"));
+  });
+
+  /* …and every shape node ACCEPTS, which is the half a "reject harder" fix breaks.
+   * Padding is optional (`"YQ"`), ASCII whitespace is stripped from ANYWHERE, and the
+   * unused low bits of a final symbol are DISCARDED rather than required to be zero
+   * (node decodes `"YR=="` to `"a"` exactly as it decodes `"YQ=="`).
+   *
+   * Every decoded byte here is non-zero on purpose: a base64 input that decodes to a NUL
+   * (`"AA=="`) is the pre-existing runtime-NUL door — our strings are NUL-terminated, so
+   * the value truncates — and it is documented with the rest of that table in
+   * docs/divergences.md rather than pretended away here. */
+  it("atob still accepts the forgiving-base64 shapes node accepts", async () => {
+    await expectSameBytes([
+      'console.log(atob("YQ=="), atob("YQ"), atob("YWJj"), atob("YWI="));',
+      // `.length` is asked only of an ASCII decode: for a byte above 0x7F it is UTF-8
+      // BYTES here and UTF-16 units in node (§A.2), so `atob("////").length` is 6 vs 3 —
+      // the documented index-space divergence, not a base64 one.
+      'console.log("[" + atob("") + "]", atob("bmF0aXZldHM=").length, atob("////") === "\\u00ff\\u00ff\\u00ff");',
+      'console.log(atob(" YQ== "), atob("Y Q =  ="), atob("\\tYQ==\\n"), atob("\\fYQ==\\r"));',
+      'console.log(atob("YR=="), atob("YQE="), atob("YQF="));',
+      'console.log(atob("bmF0aXZl").length, atob("bmF0aXZldA==").length);',
+      "",
+    ].join("\n"));
+  });
+
+  /* The raise crosses on the pending-exception slot (`nt_exc_raise_msg`), the same way
+   * `JSON.parse`'s does — so it is CATCHABLE in a `try` in the same frame, and the program
+   * runs on to exit 0. The handler prints a constant: node's `e` is a DOMException and ours
+   * is the message string, a pre-existing difference in every runtime-raised message's
+   * SHAPE that is not what this test is about. */
+  /* …and being fallible means `emitExcCheck`'s existing REFUSALS reach these calls, which
+   * is the half of "follow the JSON.parse precedent" that is easy to claim in prose and not
+   * check. A `finally`-only `try` has no catch block to branch to, so `NT1004` — the same
+   * answer `JSON.parse` in that position already gives, reached through the same code. */
+  it("btoa in a `finally`-only try is NT1004, exactly as JSON.parse there is", async () => {
+    for (const call of ['btoa("x")', 'atob("YQ==")', 'JSON.parse("1")']) {
+      const ours = await ourRun(`try { console.log(${call}); } finally { console.log("f"); }\n`);
+      if (!isRefusal(ours)) throw new Error(`${call} compiled; expected NT1004`);
+      expect([call, ours.refused.includes("NT1004")]).toEqual([call, true]);
+    }
+  });
+
+  it("the base64 throw is catchable in the same frame", async () => {
+    await expectSameBytes([
+      "try {",
+      '  console.log(btoa("\\u4f60"));',
+      '  console.log("not reached");',
+      '} catch (e: string) { console.log("caught btoa"); }',
+      "try {",
+      '  console.log(atob("!!!!"));',
+      '  console.log("not reached");',
+      '} catch (e: string) { console.log("caught atob"); }',
+      'console.log("after");',
+      "",
+    ].join("\n"));
+  });
 });
 
 describe("fuzz findings — non-ASCII case mapping", () => {
   /*
    * §A.2 documents that string LENGTH and SLICING are UTF-8 byte oriented. It does not cover
-   * case mapping, and `toUpperCase`/`toLowerCase` are a no-op outside ASCII — the bytes are
-   * well-formed UTF-8, they are simply the unmapped input, so nothing signals the miss.
+   * case mapping, and `toUpperCase`/`toLowerCase` were a no-op outside ASCII — the bytes are
+   * well-formed UTF-8, they are simply the unmapped input, so nothing signalled the miss.
+   *
+   * FIXED: both now map U+0000..U+017F (ASCII, Latin-1 Supplement, Latin Extended-A)
+   * exactly. The range is bounded because `runtime/` is libc-only, which rules out the
+   * locale-dependent `towupper` and the full Unicode tables alike; from U+0180 up the
+   * mapping is the identity and that boundary is now documented (docs/divergences.md §A.4).
+   * The exhaustive sweeps live in `test/case-mapping.test.ts`.
    */
-  it.failing("toUpperCase/toLowerCase map non-ASCII letters", async () => {
+  it("toUpperCase/toLowerCase map non-ASCII letters", async () => {
     await expectSameBytes([
       'console.log("\\u00e9".toUpperCase());', // node É, ours é
       'console.log("\\u00c9".toLowerCase());', // node é, ours É
@@ -293,28 +472,49 @@ describe("fuzz findings — non-ASCII case mapping", () => {
 
 describe("fuzz findings — refusals and stops (ranked last)", () => {
   /*
-   * `String(Math.PI)` is refused, while `console.log(Math.PI)` and `(Math.PI).toFixed(3)`
-   * both compile: `Math` resolves as a value only in some argument positions. A false
-   * refusal, not a wrong answer.
+   * FIXED. The report read this as an argument-position inconsistency — `String(Math.PI)`
+   * refused while `console.log(Math.PI)` and `(Math.PI).toFixed(3)` compiled. Measured,
+   * none of the three compiled: `Math` was recognized ONLY as a call CALLEE, so every
+   * `Math.<constant>` read failed identically and the working neighbours were all
+   * `Math.<method>(…)` calls. `String()` was never involved. The eight data properties
+   * now have a member-read path of their own; see `test/stdlib-batch1.test.ts`.
    */
-  it.failing("String(Math.PI) compiles", async () => {
+  it("String(Math.PI) compiles", async () => {
     await expectSameBytes("console.log(String(Math.PI));\n");
   });
 
   /*
-   * `"abc".padStart(Infinity, "xy")` is a RangeError in node (exit 1, a message on stderr).
-   * Here the process dies on a SIGNAL with an EMPTY stderr — no `nativets: out of memory`,
-   * no panic line, nothing. Both sides stop, so it is not a wrong answer, but a silent
-   * signal death is not the documented controlled stop either.
+   * FIXED (fx-padstop). `"abc".padStart(Infinity, "xy")` is a RangeError in node (exit 1,
+   * a message on stderr). Here the process died on a SIGNAL with an EMPTY stderr — no
+   * `nativets: out of memory`, no panic line, nothing: `(long)Infinity` is UB in C, arm64
+   * saturated it to LONG_MAX and asked malloc for 9 exabytes. (On x86-64 the same
+   * conversion yields LONG_MIN, which makes `n >= target` true and silently answers
+   * `"abc"` at exit 0 — the same source, a wrong answer instead of a stop, decided by the
+   * host.) It now stops the documented way, with a `panic:` line naming the length.
+   *
+   * The pinned assertion is REWRITTEN, not merely un-`.failing`ed: as recorded it demanded
+   * `stderrLen: 0`, which describes neither the bug nor a diagnostic. What a fix has to
+   * deliver is asserted instead — stdout byte-identical to node's up to the stop, a real
+   * message on stderr, and a deliberate exit code. The neighbours this shares a path with
+   * (`padEnd`, `.repeat`, and `.repeat`'s far worse size_t WRAP) are covered case by case
+   * in test/panic.test.ts, "string length".
    */
-  it.failing("an over-long padStart stops with a diagnostic, not a bare signal", async () => {
+  it("an over-long padStart stops with a diagnostic, not a bare signal", async () => {
     const src = 'console.log("start");\nconsole.log("abc".padStart(Infinity, "xy"));\n';
     const oracle = nodeRun(src);
     const ours = await ourRun(src);
     if (isRefusal(ours)) throw new Error(`refused: ${ours.refused}`);
     expect(oracle.exitCode).toBe(1);
-    expect(oracle.stderr.toString("utf8")).toContain("RangeError");
-    // Ours: killed by a signal, stderr empty.
-    expect({ signal: ours.signal, stderrLen: ours.stderr.length }).toEqual({ signal: null, stderrLen: 0 });
+    expect(oracle.stderr.toString("utf8")).toContain("RangeError: Invalid string length");
+    // Both sides stop at the same point, so everything printed before it must agree byte
+    // for byte — the part of the contract a differential run actually compares.
+    expect(Buffer.compare(ours.stdout, oracle.stdout)).toBe(0);
+    expect(ours.stdout.toString("latin1")).toBe("start\n");
+    // Ours: a controlled panic (SIGABRT, shell 134) with the reason on stderr, not silence.
+    expect(ours.stderr.toString("utf8")).toContain("panic: invalid string length");
+    expect(ours.signal).toBe("SIGABRT");
+    // The exit code is where we diverge from node's 1 — deliberately, and documented in
+    // docs/divergences.md: this is a panic, like an out-of-range index, not a throw.
+    expect(ours.exitCode).toBe(-1); // spawnSync reports `status: null` for a signalled child
   });
 });

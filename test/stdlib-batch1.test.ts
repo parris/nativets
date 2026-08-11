@@ -26,6 +26,15 @@ function rejectCode(src: string): string | null {
   try { sourceToIR(src); return null; } catch (e) { return e instanceof NTError ? e.diag.code : "throw"; }
 }
 
+/** The full diagnostic a source is rejected with — message and hint, not just the code. */
+function rejectDiag(src: string): { code: string; message: string; hint: string } {
+  try { sourceToIR(src); } catch (e) {
+    if (e instanceof NTError) return { code: e.diag.code, message: e.diag.message, hint: e.diag.hint ?? "" };
+    throw e;
+  }
+  throw new Error(`expected a refusal, but this compiled:\n${src}`);
+}
+
 interface Case { name: string; code: string }
 
 /** Run every case in a table as a differential test against node. */
@@ -475,6 +484,111 @@ console.log(Number.isInteger(4), Number.isFinite(1 / 0), Number.isSafeInteger(2 
 `,
   },
 ]);
+
+/*
+ * The `Math.*` DATA properties. `Math` was reachable only as a call callee
+ * (`Math.floor(x)`), so a member READ had no path of its own and fell through to the
+ * generic identifier resolution, which reported `NT2001 'Math' is not defined` — a
+ * message that is FALSE, since `Math.floor(1.5)` on the line above compiles. This
+ * mirrors the `Number.*` constants above, whose member-read path already existed.
+ *
+ * BORROWED: tc39/test262 `built-ins/Math/{E,PI,LN2,LN10,LOG2E,LOG10E,SQRT2,SQRT1_2}/`
+ * — one directory per constant, each with a `value.js` asserting the exact double and a
+ * `prop-desc.js` asserting it is non-writable/non-configurable (so folding the read to a
+ * literal is observationally right — nothing can ever change it). The expected output is
+ * node's, not transcribed.
+ */
+differential("stdlib batch 1: the Math constants match node", [
+  {
+    name: "all eight Math data properties, read as values",
+    code: `
+console.log(Math.E, Math.PI);
+console.log(Math.LN2, Math.LN10);
+console.log(Math.LOG2E, Math.LOG10E);
+console.log(Math.SQRT2, Math.SQRT1_2);
+`,
+  },
+  {
+    name: "a Math constant flows through every position an ordinary number does",
+    code: `
+console.log(String(Math.PI));
+console.log(Number(Math.E));
+console.log(\`\${Math.PI}\`);
+console.log((Math.PI).toFixed(3));
+const x = Math.PI;
+console.log(x * 2, Math.floor(Math.PI), Math.max(Math.E, Math.PI));
+`,
+  },
+]);
+
+/*
+ * The other half of the Math-constant path: what must STAY refused, and with what words.
+ *
+ * `MATH_CONSTS` is a `Map` for a behavioural reason, and this pins it. Were it a plain
+ * object, `Math.constructor` would read through `Object.prototype`, answer a FUNCTION,
+ * satisfy the `!== undefined` guard, and fold to `NaN` — exit 0, wrong output, the
+ * silent-wrong-answer class. `NUMBER_CONSTS` shipped exactly that bug (six inherited
+ * names; see `test/record-dict.test.ts`), so the same six are pinned here.
+ */
+describe("stdlib batch 1: a non-constant Math member is REFUSED, never folded", () => {
+  const REFUSED: string[] = [
+    `console.log(Math.constructor);`,     // node: [Function: Object]
+    `console.log(Math.toString);`,        // node: [Function: toString]
+    `console.log(Math.hasOwnProperty);`,  // node: [Function: hasOwnProperty]
+    `console.log(Math.valueOf);`,         // node: [Function: valueOf]
+    `console.log(Math.NOPE);`,            // node: undefined
+    `console.log(Math.pi);`,              // node: undefined — the constants are CASE-sensitive
+    `console.log(Math.floor);`,           // node: [Function: floor] — a method as a VALUE
+  ];
+  for (const src of REFUSED) {
+    test(`refused: ${src.trim()}`, () => { expect(rejectCode(src)).toBe("NT1002"); });
+  }
+
+  test("a user binding named Math SHADOWS the builtin, as in node", async () => {
+    const { ours, oracle } = await expectMatchesNode(`
+const Math = { PI: 1, floor: 2 };
+console.log(Math.PI, Math.floor);
+`);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+  });
+});
+
+/*
+ * A builtin named as a bare VALUE. `'Math' is not defined` was a FALSE sentence — the
+ * same one `Math.PI` used to produce — and it points a reader at a missing import rather
+ * than at the unimplemented feature. It is also filed in the wrong band: `src/coverage.ts`
+ * counts only NT1xxx into its blocker histogram, so as an NT2xxx ("the user's type
+ * error") every one of these was invisible to the burn-down meant to find it. Same
+ * argument the `process.*` host reads were re-banded under.
+ *
+ * The hint ASSERTS that the compiler implements the name's members, so every namespace
+ * listed has a member proven against node above or in the fixtures; a name with no member
+ * support (`Promise`) keeps the honest `not defined`.
+ */
+describe("stdlib batch 1: a known builtin used as a value says so, and is not called undefined", () => {
+  for (const name of ["Math", "JSON", "console", "Number", "String", "Object", "Array", "Date"]) {
+    test(`\`const v = ${name}\` names the real gap`, () => {
+      const d = rejectDiag(`const v = ${name};\nconsole.log(typeof v);\n`);
+      expect(d.code).toBe("NT1002");
+      expect(d.message).toContain(`'${name}'`);
+      expect(d.message).not.toContain("is not defined");
+      expect(d.hint).toContain(`${name}.`);
+    });
+  }
+
+  test("a genuinely unknown name is still NT2001 'is not defined'", () => {
+    const d = rejectDiag(`const v = nosuchthing;\nconsole.log(v);\n`);
+    expect(d.code).toBe("NT2001");
+    expect(d.message).toBe("'nosuchthing' is not defined");
+  });
+
+  test("a builtin with no implemented members keeps the honest 'not defined'", () => {
+    // The hint the branch above emits would be a LIE for a name whose members are all
+    // missing, so `Promise` must not be in the set until one of them lands.
+    expect(rejectDiag(`const v = Promise;\nconsole.log(v);\n`).code).toBe("NT2001");
+  });
+});
 
 /*
  * `Math.round` — ECMAScript 21.3.2.28, which is NOT `floor(x + 0.5)`.
