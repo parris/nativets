@@ -27,6 +27,7 @@ a trap:
 | `a[-1]` | `0` | `undefined` |
 | `"abc"[7]` | `""` | `undefined` |
 | `u[9] = 1` on a 4-byte array | silently ignored | silently ignored |
+| `a[1.5]` on `[1,2,3]` | `2` (truncated!) | `undefined` |
 
 A wrong-but-plausible `0` is the worst outcome available: the program keeps running and computes
 a wrong answer from a value that was never there. Memory safety is supposed to mean *a guaranteed
@@ -42,6 +43,30 @@ Rules:
   32-element persistent-trie threshold). **Negative indices panic everywhere** (they are not
   Python-style wrap-around). See the next bullet for what node actually does at each of these —
   the answer is not uniform, and the `.with` case is a real divergence, not a shared stop.
+- **A NON-INTEGER index is out of bounds too** — `NaN`, `±Infinity` and any fraction. In JS
+  `a[1.5]` is a property lookup on the string `"1.5"`, which no array, string or typed array
+  has, so node reads `undefined`; it does **not** truncate to `a[1]`. The runtime used to
+  truncate the double and read the neighbour, which was a *silent wrong answer*, not a
+  divergence:
+
+  ```ts
+  const a: number[] = [1, 2, 3];
+  let i = 1.5;
+  console.log(a[i]);   // node: undefined   nativets (before): 2   nativets (now): panic
+  ```
+
+  Also `"abc"[1.5]` → `"b"`, `u[1.5]` → byte 1, and `u[1.5] = 7` **overwrote byte 1** where node
+  stores an ordinary `"1.5"` property and leaves the bytes alone. All exited 0 with no
+  diagnostic. The **compile-time** half had always agreed with node here — `checkStaticBounds`
+  requires `Number.isInteger`, so the literal `a[1.5]` has always been `NT2002` — so the two
+  halves of the same rule disagreed, and the runtime was the one that was wrong. Fixed:
+  `NT_IS_INDEX` in `runtime/runtime.c` (guarded copy in `nt_bytes.c`).
+
+  **`arr.with(i, v)` is deliberately excluded**: node's `.with` runs its index through
+  `ToIntegerOrInfinity`, so `[1,2,3].with(1.7, 9)` really *is* `[1,9,3]` — truncating there
+  matches node and is left alone. Bracket indexing has no such coercion. (`.with(NaN, 9)` is
+  `[9,2,3]` in node and still panics here — see the negative-index table's `.with` row for the
+  same class of gap.)
 - **What node does with a NEGATIVE index — and where our rule genuinely diverges.** Verified
   against node, every case:
 
@@ -74,18 +99,42 @@ Rules:
   `String#charAt(i)` is likewise untouched — node *defines* it as `""` out of range, so it is not
   a defect and does not panic.
 
-  **But `.at` is only the right advice for a NON-NEGATIVE read**, and both the `NT2002` hint and
-  the runtime `help:` line currently offer it unconditionally. Two ways that is wrong:
+  **`.at` is only the right advice for a read at or past the end**, and both the `NT2002` hint
+  and the runtime `help:` line used to offer it unconditionally, to every accessor and every
+  index. Following it did not avoid the panic — it silently returned a **different value**:
 
-  - **Negative index:** the hint on `a[-1]` reads "use `.at(-1)` if you want `undefined` instead
-    of a panic". `a.at(-1)` is **`3`**, not `undefined` — node's `a[-1]` is `undefined` and
-    `a.at(-1)` is the *last element*. Following the hint changes the program's answer instead of
-    preserving it. Same for `"abc".at(-1)` → `"c"` and `u.at(-1)` → the last byte.
-  - **Not a read:** on `u[i] = v` and on `arr.with(i, v)` the `help:` line still says `.at(…)`.
-    `.at` is a read — it cannot express either one, so the advice is not actionable at all.
+  | written | node | the advised replacement | node |
+  |---|---|---|---|
+  | `[1,2,3][5]` | `undefined` | `[1,2,3].at(5)` | `undefined` ✅ |
+  | `[1,2,3][-1]` | `undefined` | `[1,2,3].at(-1)` | **`3`** — the LAST element ❌ |
+  | `"abc"[-1]` | `undefined` | `"abc".at(-1)` | **`"c"`** ❌ |
+  | `[1,2,3][1.5]` | `undefined` | `[1,2,3].at(1.5)` | **`2`** — truncates ❌ |
+  | `[1,2,3][NaN]` | `undefined` | `[1,2,3].at(NaN)` | **`1`** — element 0 ❌ |
+  | `u[i] = v` | discards the write | — | `.at` is a **read**; it cannot express a write ❌ |
+  | `a.with(i, v)` | `RangeError` / relative | — | `.at` is a **read**; it cannot update ❌ |
 
-  Both are live defects in the diagnostics, not in this document; they are filed with repros
-  under "Reported, not fixed here" at the end of this section.
+  **Both hints are now keyed on the accessor and the index.** `nt_panic_bounds` already received
+  a `what` argument and now composes a different `help:` line per accessor (`nt_bytes.c`'s write
+  passes its own `what`, `"Uint8Array write index"`, rather than sharing the read's), and
+  `checkStaticBounds` does the same for `NT2002` through `atSuggestion`. What each says now:
+
+  - **read, at or past the end** — unchanged; ``use `.at(5)` to get `undefined` instead of
+    panicking`` is true there.
+  - **read, negative** — names that node reads `undefined` and that `.at` counts from the END
+    instead, so it is *not* the same value.
+  - **read, fractional / `NaN`** — names that `.at` truncates and that `.at(NaN)` reads
+    element 0.
+  - **read, infinite** — the one non-finite case `.at` gets right (`.at(±Infinity)` really is
+    `undefined`), said so, with a note that an infinite index means the arithmetic is wrong.
+  - **typed-array write** — node *discards* an out-of-range write, so no accessor replaces it:
+    test `i >= 0 && i < u.length` first. `.at` is named only to rule it out.
+  - **`.with`, negative** — points at `.with(a.length - 1, v)`, which is exactly node's
+    `.with(-1, v)`.
+  - **`.with`, out of range** — node throws `RangeError: Invalid index` too; to append, spread.
+
+  Every one of those lines is **executed against node** in `test/panic.test.ts` ("the advice
+  compiles and matches node"). A hint whose advice is never run is a hint nobody checked, and
+  this class is only caught by running it.
 - **Compile-time beats runtime.** When the length and the index are both statically known — a
   literal array/string, or a `const` bound to one, indexed by a numeric literal — the program is
   **rejected** with **`NT2002`** (`index 5 is out of bounds for an array of length 3`) rather than
@@ -126,24 +175,26 @@ So the negative-index rule is uniform in the code but **not** uniform in its jus
 accessors are covered by the Stage-41 phantom-value argument, and `.with` is covered by nothing
 except consistency with them. Whoever changes it should change the rule, not this document.
 
-#### Reported, not fixed here — two lying hints on this path
+#### FIXED — the two lying hints on this path
 
-Both are in files held by other lanes at the time of the audit, so they are filed rather than
-patched. Both are the "hint recommends code that does something else" class.
+Both were filed here by the documentation audit and are now repaired; kept as a record because
+the *class* recurs. Both were "the hint recommends code that does something else".
 
 1. **`src/checker.ts` (`NT2002` hint) — `.at(-1)` does not give `undefined`.** For a negative
-   literal index the hint reads ``use `.at(-1)` if you want `undefined` instead of a panic``.
-   Verified in node: `[1,2,3][-1]` is `undefined`, but `[1,2,3].at(-1)` is `3`. The hint's advice
-   silently changes the answer. Repro: `const a: number[] = [1,2,3]; console.log(a[-1]);`
-   Applies to strings (`"abc".at(-1)` → `"c"`) and `Uint8Array` alike. The suggestion is only
-   sound for a non-negative index; for a negative one the honest advice is `?? fallback` on
-   `.at(i)` **only if the wrap-around is wanted**, and otherwise a length check.
-2. **`runtime/runtime.c` (`nt_panic_bounds` help line) — `.at` is suggested for non-reads.** The
-   line is built once for every accessor, so a `Uint8Array` **write** (`u[-1] = 7`) and
-   `arr.with(-1, 9)` both advise ``use `.at(-1)` to get `undefined` instead of panicking``.
-   `.at` is a read and cannot express either operation. It also inherits defect 1 for every
-   negative index. The fix wants the suggestion to depend on the `what` argument the caller
-   already passes, rather than being unconditional.
+   literal index the hint read ``use `.at(-1)` if you want `undefined` instead of a panic``.
+   `[1,2,3][-1]` is `undefined` but `[1,2,3].at(-1)` is `3`, so the advice silently changed the
+   answer; likewise `"abc".at(-1)` → `"c"`. Now keyed on the index by `atSuggestion`, which also
+   covers the fractional case that the same audit did not reach.
+2. **`runtime/runtime.c` (`nt_panic_bounds` help line) — `.at` was suggested for non-reads.** One
+   line was composed for every accessor, so a `Uint8Array` **write** and `arr.with(i, v)` were
+   both told to use `.at`, a read that cannot express either. Now keyed on the `what` argument
+   the caller already passed.
+
+**And the defect that fell out of fixing them:** writing a truthful hint for a *fractional* index
+meant producing one, and the runtime never panicked on it at all — it truncated, so `a[1.5]` was
+`2` where node reads `undefined`. That was a silent wrong answer hiding behind a lying hint, and
+it is the argument for the standing rule: **compile the advice you write and run it against
+node.** Recorded in the non-integer bullet above.
 
 ### Decorators — a class method that assigns a field (`docs/decorators.md`)
 
@@ -566,7 +617,7 @@ Everything else about Batch 3:
   catchably, through the pending-exception protocol. `console.log(date)` prints the ISO string
   (node's `util.inspect` of a Date) and `Invalid Date` for `NaN`; `JSON.stringify` emits the
   quoted ISO string, or `null` for an Invalid Date — all node-exact.
-- **A Date is an IMMUTABLE time value.** `setHours`/`setDate`/… are refused (**`NT1023`**),
+- **A Date is an IMMUTABLE time value.** `setHours`/`setDate`/… are refused (**`NT1024`**),
   pointing at reconstruction (`new Date(d.getTime() + ms)`). So is `Date#toString`/
   `toLocaleDateString` — those are locale + zone-*display-name* formatting, which needs tables
   we do not ship. `"" + date` is refused for the same reason.
@@ -575,7 +626,7 @@ Everything else about Batch 3:
   (input is assumed canonical; node re-normalizes). node throws a `TypeError` on a URL it cannot
   parse and so do we — catchably — but for a *different set* of inputs: a `file:///x` that node
   accepts throws here. `.href` and `URL#toString()` need the WHATWG serializer, so they are
-  refused (`NT1023`) rather than approximated; `console.log(url)` likewise (node inspects it as
+  refused (`NT1024`) rather than approximated; `console.log(url)` likewise (node inspects it as
   `URL { … }`).
 - **`URLSearchParams` is read-only**: `.get`/`.has`/`.getAll`/`.toString`. `.append`/`.set`/
   `.delete`/`.sort` mutate, so they are refused — consistent with immutable-by-default.
@@ -589,24 +640,41 @@ Everything else about Batch 3:
   back, non-writable) holds exactly. `Object.assign`/`defineProperty`/`setPrototypeOf` MUTATE
   their target and are refused with **`NT1606`** pointing at object spread.
 
-  **`Object.isFrozen` is constant-`true`, and that DOES diverge — it is a silent wrong answer.**
-  An earlier version of this bullet stated the constant-`true` as if it followed from node's
-  contract holding. It does not: node answers `isFrozen` about *this object's* state, not about
-  whether the language permits mutation, so a never-frozen object is `false` there.
+  **`Object.isFrozen` USED to be constant-`true`, which was a silent wrong answer. It is now
+  REFUSED (`NT1002`), together with `Object.isSealed` and `Object.isExtensible`.**
+
+  The constant was justified by "objects are immutable here anyway, so nothing can ever be
+  unfrozen". node does not ask that question: `isFrozen` reports whether *this object* was
+  frozen, not whether the language permits mutation, so a never-frozen object is `false` there.
 
   ```ts
   const o = { a: 1 };
-  console.log(Object.isFrozen(o));         // node: false      nativets: true
-  console.log(Object.isFrozen(Object.freeze(o)));  // node: true   nativets: true
+  console.log(Object.isFrozen(o));   // node: false   nativets (before): true   — exit 0 both sides
   ```
 
-  Exit 0 on both sides, no diagnostic — so this is the project's own worst category, a
-  wrong answer that keeps running, and it is recorded here rather than left implied. The
-  post-`freeze` answer agrees; only the pre-`freeze` one is wrong. Two honest repairs exist and
-  neither is taken yet: refuse `Object.isFrozen` outright (`NT1023`, consistent with how
-  `Date#setHours` and `URL#href` are handled — it cannot be answered without a per-object frozen
-  bit we do not carry), or add that bit. Reported alongside the diagnostics defects above.
-- **`String#normalize` and `#localeCompare` are refused** (`NT1023`), not approximated:
+  Refused rather than answered, and the choice was between the two:
+
+  - **A frozen bit is not available.** An object is a bare block of `i64` slots — codegen reads
+    field *i* at `getelementptr i64, ptr o, i64 i` — with no header to carry one. Adding it is a
+    change to the representation of every object in the language.
+  - **A compile-time approximation would be UNSOUND, not merely incomplete.** `Object.freeze`
+    returns the *same* object, so `const f = Object.freeze(o)` makes `Object.isFrozen(o)` true in
+    node as well. Deciding it from the syntactic form of the argument would need alias analysis,
+    and getting it wrong reproduces the very defect being removed — a closer-looking guess in
+    place of a wrong constant. **Reject, never miscompile.**
+
+  So `Object.isFrozen` joins `Date#setHours` and `URL#href`: refused because it cannot be
+  answered honestly. `isSealed`/`isExtensible` are the same question and already landed on the
+  same `NT1002`; they now share the specific hint, which names the aliasing reason and says the
+  useful thing — objects here are already deeply immutable and every mutation is a compile
+  error, so a freeze guard has nothing to guard.
+
+  **`Object.freeze` itself is untouched**: node's contract for it — the same object back — is met
+  exactly, and the frozen-ness it establishes was only ever observable through the three
+  predicates that now refuse. (One divergence remains on it: `Object.freeze(o)` **moves** `o`
+  under the ownership rules, so `Object.freeze(o) === o` is `NT1601` here where node says `true`.
+  A refusal, not a wrong answer.)
+- **`String#normalize` and `#localeCompare` are refused** (`NT1024`), not approximated:
   normalization needs the Unicode character database and collation needs ICU
   (`"a".localeCompare("B")` is `-1` in node but `+1` under any byte compare — §A on string
   relational order).
@@ -1047,8 +1115,10 @@ the Stage 41 runtime panic — where node yields `undefined`. So:
 
 Reading the guard as "make this read safe" is therefore wrong: it makes the *base* safe. Use
 `.at(i)` for node's out-of-range `undefined`, exactly as with a plain `a[i]` — **but only for a
-NON-NEGATIVE `i`**. `.at(-1)` is node's *last element*, not `undefined`, so it is not a
-substitute for `a?.[-1]`; see the headline section's `.at` bullet for the full trap.
+NON-NEGATIVE WHOLE `i`**. `.at(-1)` is node's *last element* and `.at(1.5)`/`.at(NaN)` truncate,
+none of them `undefined`, so they are not substitutes for `a?.[-1]` / `a?.[1.5]`; see the
+headline section's `.at` table for the full trap. The panic's own `help:` line now says which of
+these applies, per accessor and per index.
 
 **`?.` in a write position is refused (`NT0001`) — this is agreement with node, not a
 divergence.** ECMAScript's `IsValidSimpleAssignmentTarget` returns `false` for an
