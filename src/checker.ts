@@ -2320,9 +2320,14 @@ class Checker {
     // because the assumption is only ever used to close a cycle it is itself inside.
     if (isTypeRefTy(target) || isTypeRefTy(source)) {
       const key = `${target}|${source}`;
-      const seen = assumed ?? new Set<string>();
+      // REBOUND, not mutated: a Set is persistent, so `.add` returns a new one. The rebind
+      // is sound here — and not the lost update that shape usually is — because the set has
+      // exactly one consumer, the recursive call on the next line that takes it as an
+      // ARGUMENT. Nothing above this frame ever reads it back, so there is no write for a
+      // caller to lose. Identical under node, where `.add` returns the receiver.
+      let seen = assumed ?? new Set<string>();
       if (seen.has(key)) return true;
-      seen.add(key);
+      seen = seen.add(key);
       return this.assignable(this.unfold(target), this.unfold(source), seen);
     }
     // SH2: a union value IS one of its members' object blocks — there is no box — so
@@ -7094,8 +7099,13 @@ function daIsExit(e: Expr): boolean {
 function daMerge(paths: { flow: DAFlow; diverged: boolean }[], fallback: DAFlow): DAFlow {
   const live = paths.filter((p) => !p.diverged);
   if (live.length === 0) return new Set(fallback); // every path left; nothing merges here
+  // REBUILT per path, not deleted from. `.delete` is the one persistent mutator with no
+  // rebinding spelling that survives both runtimes: node's `.delete` returns a BOOLEAN, so
+  // `out = out.delete(n)` would leave `out === true` under bun. Filtering into a fresh Set
+  // says the same thing under both, and costs what the discarded form already cost — the
+  // old line materialized `[...out]` per path to iterate it safely anyway.
   let out = new Set(live[0]!.flow);
-  for (const p of live.slice(1)) for (const n of [...out]) if (!p.flow.has(n)) out.delete(n);
+  for (const p of live.slice(1)) out = new Set([...out].filter((n) => p.flow.has(n)));
   return out;
 }
 
