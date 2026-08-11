@@ -697,6 +697,26 @@ const STRING_METHODS: Map<string, MethodSig> = new Map<string, MethodSig>()
   // omitted means +Infinity, NOT 0. Not symmetric with `.indexOf`'s fromIndex.
   .set("lastIndexOf", { min: 1, max: 2, argTys: ["string", "number"], ret: "number" });
 /**
+ * The shared refusal hint for `.includes` / `.indexOf` / `.lastIndexOf` on an array whose
+ * ELEMENT is not a primitive. One constant, because all three refuse for one reason and a
+ * hint written out three times is how two of them drift.
+ *
+ * The generic `NYI.ARRAY` hint ("arrays need the heap value model") is true but says
+ * nothing a caller can act on, and the way out here is exact rather than "wait": a
+ * predicate closure with `===` reproduces node's answer precisely, because `===` on an
+ * array or object IS the pointer compare (see codegen's `isArrayTy(lt) || isObjectTy(lt)`
+ * arm) and that is what node's SameValueZero reduces to on a reference. Both spellings
+ * below are compiled against node in test/array-includes.test.ts.
+ */
+const SEARCH_NONPRIMITIVE_HINT =
+  "on a non-primitive element, node's answer is reference IDENTITY — the same allocation, " +
+  "not an equal-looking one — and these three routines compare element VALUES. Spell the " +
+  "identity test with a predicate, which does compile and matches node exactly: " +
+  "`arr.some((x) => x === needle)` for `.includes`, and `arr.findIndex((x) => x === needle)` " +
+  "for `.indexOf` (`===` on an array or object is the pointer compare). If you meant " +
+  "structural equality, compare a primitive projection instead — " +
+  "`arr.some((x) => x.length === needle.length)`.";
+/**
  * Host FFI (SH4) — the signatures of the `node:` builtins, keyed by their canonical
  * name. Unlike GLOBAL_FUNCS these are NOT ambient: a name is only in scope when the
  * program imported it (`Program.hostImports`), so node and nativets agree on what is
@@ -5424,6 +5444,34 @@ class Checker {
           // the length test comes first: nativets panics on the out-of-range read where node
           // would have handed `exprLoc` an `undefined` and let the `??` pick the fallback.
           (e.args.length > 0 ? exprLoc(e.args[0]!) : undefined) ?? e.loc);
+      // `Object.is(a, b)` is SameValue (ES 7.2.10) — the THIRD equality, agreeing with
+      // `===` except at NaN (equal) and with SameValueZero except at signed zero (NOT
+      // equal). It takes two PRIMITIVES here; on a non-primitive node's answer is
+      // reference identity, which this value model does not carry, so that is refused with
+      // a hint that says so. It used to fall through to the blanket `Object.${p}` refusal
+      // below, whose hint reads "object literals need the heap value model" — untrue of a
+      // static method over two primitives, and `Object.is` is the natural `-0` probe, so
+      // the wrong hint sent readers to `1 / x` instead.
+      if (p === "is") {
+        if (e.args.length !== 2) throw typeError("Object.is expects 2 arguments");
+        const at = this.type(e.args[0]!, scope);
+        const bt = this.type(e.args[1]!, scope);
+        const prim = (t: Ty): boolean => t === "number" || t === "string" || t === "boolean";
+        // Written out per argument rather than looped over `[[at, 0], [bt, 1]]`: that is a
+        // `[Ty, number]` TUPLE, which nativets refuses (NT1037, mixed element types), and
+        // `src/` has to stay inside the subset it compiles. `blocker-metric` caught it.
+        const identityHint =
+          "on a non-primitive, `Object.is` is reference IDENTITY — whether the two names " +
+          "denote the same allocation. nativets copies freely (copy-on-write arrays, " +
+          "single-owner moves), so identity is not an observable this value model carries " +
+          "and answering it would be a guess. Compare the primitives you care about " +
+          "instead — `Object.is(a.length, b.length)` — or use `===`, which on an array or " +
+          "object IS the pointer compare and matches node. `Object.is` over " +
+          "`number`/`string`/`boolean` works, signed zero and NaN included.";
+        if (!prim(at)) throw nyi(NYI.OBJECT, `Object.is on ${at}`, identityHint, exprLoc(e.args[0]!) ?? e.loc);
+        if (!prim(bt)) throw nyi(NYI.OBJECT, `Object.is on ${bt}`, identityHint, exprLoc(e.args[1]!) ?? e.loc);
+        return "boolean";
+      }
       if (p !== "keys" && p !== "values" && p !== "entries" && p !== "getOwnPropertyNames") throw nyi(NYI.OBJECT, `Object.${p}`);
       if (e.args.length !== 1) throw typeError(`Object.${p} expects 1 argument`);
       const ot = this.type(e.args[0]!, scope);
@@ -6673,7 +6721,19 @@ class Checker {
       case "copyWithin": throw mutationError(`arrays are immutable: \`${exprText(callee.object) ?? ""}.copyWithin\` would overwrite the array in place`, "build a new array from `.slice` + spread instead", exprLoc(callee.object) ?? callee.loc);
       // (`.pop` is handled above `argTys`, next to `.push` — the two are one idiom and the
       // refusal has to see the receiver AND whether the result is taken.)
-      case "includes": need(1); if (argTys[0] !== el) throw typeError(`.includes expects ${el}`); return "boolean";
+      // The element-type guard on all three of `.includes` / `.indexOf` / `.lastIndexOf`
+      // is the SAME guard, and it was on `.lastIndexOf` alone. Without it a `number[][]`
+      // fell through to `nt_arr_includes_str`, which `strcmp`s the bytes of an `NtArray`
+      // struct: an out-of-bounds read, and a silent wrong answer at exit 0 whenever it
+      // matched (`[[1],[2]].includes([1])` printed `true`, node says `false`;
+      // `.indexOf` printed `0`, node says `-1`). node's answer is reference identity,
+      // which this value model does not have — so it is refused, not guessed.
+      // `.includes` takes `boolean` too, which the other two have no runtime routine for.
+      case "includes":
+        need(1);
+        if (argTys[0] !== el) throw typeError(`.includes expects ${el}`);
+        if (el !== "number" && el !== "string" && el !== "boolean") throw nyi(NYI.ARRAY, `.includes on ${recv}`, SEARCH_NONPRIMITIVE_HINT);
+        return "boolean";
       // `.indexOf(x, fromIndex?)` — the second parameter is optional in lib.es5.d.ts, so
       // requiring exactly one rejected valid TypeScript with a TYPE error. See the
       // `.lastIndexOf` arm below: same argument, deliberately different clamping.
@@ -6681,6 +6741,7 @@ class Checker {
         if (args.length < 1 || args.length > 2) throw typeError(".indexOf expects 1..2 args");
         if (argTys[0] !== el) throw typeError(`.indexOf expects ${el}`);
         if (args.length === 2 && argTys[1] !== "number") throw typeError(".indexOf fromIndex must be a number");
+        if (el !== "number" && el !== "string") throw nyi(NYI.ARRAY, `.indexOf on ${recv}`, SEARCH_NONPRIMITIVE_HINT);
         return "number";
       // ACCEPTED, unlike its in-place siblings above: `.reverse` returns its RECEIVER,
       // so the result type is `recv` and the two are the SAME array. `RETAINS_RECEIVER`
@@ -6717,7 +6778,7 @@ class Checker {
         if (args.length < 1 || args.length > 2) throw typeError(".lastIndexOf expects 1..2 args");
         if (argTys[0] !== el) throw typeError(`.lastIndexOf expects ${el}`);
         if (args.length === 2 && argTys[1] !== "number") throw typeError(".lastIndexOf fromIndex must be a number");
-        if (el !== "number" && el !== "string") throw nyi(NYI.ARRAY, `.lastIndexOf on ${recv}`);
+        if (el !== "number" && el !== "string") throw nyi(NYI.ARRAY, `.lastIndexOf on ${recv}`, SEARCH_NONPRIMITIVE_HINT);
         return "number";
       case "concat": // variadic; every argument must be an array of the same element type
         if (args.length < 1) throw typeError(".concat expects at least 1 array");

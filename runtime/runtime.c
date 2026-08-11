@@ -869,6 +869,25 @@ double js_str_len(const char *s) { return (double)nt_strlen(s); }
 
 int32_t js_str_eq(const char *a, const char *b) { return strcmp(a, b) == 0 ? 1 : 0; }
 
+/* `Object.is` on two numbers — SameValue (ES 7.2.10), the THIRD equality in the language
+ * and NOT a spelling of either of the other two. It differs from `===` at NaN (equal here)
+ * and from SameValueZero at signed zero (NOT equal here):
+ *
+ *                  NaN vs NaN     +0 vs -0
+ *   ===              false          true
+ *   SameValueZero     true          true     <- nt_arr_includes_num, above
+ *   SameValue         true          false    <- this
+ *
+ * So it must NOT be routed through `nt_arr_includes_num`'s predicate, and that one must
+ * not be "tightened" into this: the two are deliberately opposite on zero. `signbit`
+ * rather than `1/x`, because it is the only reading that survives a zero of either sign
+ * without a division. See test/object-is.test.ts. */
+int32_t js_same_value(double a, double b) {
+  if (isnan(a) || isnan(b)) return (isnan(a) && isnan(b)) ? 1 : 0;
+  if (a == 0.0 && b == 0.0) return signbit(a) == signbit(b) ? 1 : 0;
+  return a == b ? 1 : 0;
+}
+
 /* Lexicographic compare for `<` `<=` `>` `>=` and the default `.toSorted()`.
  * Returns <0 / 0 / >0. node compares UTF-16 code units; strcmp on our UTF-8 bytes
  * is code-POINT order, which agrees everywhere except astral (>= U+10000) chars
@@ -1945,6 +1964,18 @@ int32_t nt_arr_includes_num(NtArray *a, double x) {
     return 0;
   }
   for (int64_t i = 0; i < a->len; i++) if (slot_to_num(arr_at(a, i)) == x) return 1;
+  return 0;
+}
+/* A boolean array needs its own scan for the same reason `nt_arr_join_bool` does: the
+ * slot holds `zext i1` — the integers 0 and 1 — so it is neither a `double` nor a `ptr`.
+ * With only a two-way split (`number` vs everything-else) a `boolean[]` took the `_str`
+ * arm and codegen emitted an `i1` into a `ptr` parameter, which is not valid IR: clang
+ * rejected the module with a bare "constant expression type mismatch" and no NT code.
+ * SameValueZero on booleans is plain equality — there is no NaN and no signed zero here —
+ * so the needle arrives already normalized to 0/1 and this is a slot compare.
+ * See test/array-includes.test.ts. */
+int32_t nt_arr_includes_bool(NtArray *a, int32_t x) {
+  for (int64_t i = 0; i < a->len; i++) if ((arr_at(a, i) != 0) == (x != 0)) return 1;
   return 0;
 }
 int32_t nt_arr_includes_str(NtArray *a, const char *x) {
@@ -4610,11 +4641,23 @@ static const char *uri_encode(const char *s, int keep_reserved) {
   char *o = alloc_str(j);
   memcpy(o, buf, j);
   o[j] = 0;
+  free(buf); /* see uri_decode below: unregistered scratch, freed on every path */
   return o;
 }
 const char *nt_encode_uri_component(const char *s) { return uri_encode(s, 0); }
 const char *nt_encode_uri(const char *s) { return uri_encode(s, 1); }
 
+/* `buf` here is SCRATCH, not a result: the decoded bytes are copied into a fresh
+ * `alloc_str` and it is `buf` that must be reclaimed. It is UNREGISTERED memory —
+ * `nt_str_register` never saw it — so it carries no refcount and `__strLive`
+ * cannot count it, which is exactly why the missing free survived: no in-process
+ * counter and no leak test could observe it, and LeakSanitizer is Linux-only.
+ * Measured on macOS with `leaks --atExit`: 20,000 `decodeURIComponent` calls on a
+ * 75-byte input leaked 20,000 blocks / 1.83 MB, one per call, against ZERO in the
+ * same loop with the call removed. Both exits free it — the raise path does NOT
+ * longjmp (`nt_exc_raise` sets a pending flag and returns), so the early `return`
+ * really did leak too. Same shape, same fix, in `uri_encode` above; `free` is the
+ * right pair for `nativets_alloc`, which is a bare `malloc` (cf. `nt_atob`). */
 static const char *uri_decode(const char *s, int keep_reserved) {
   size_t n = strlen(s);
   char *buf = (char *)nativets_alloc(n + 1);
@@ -4623,6 +4666,7 @@ static const char *uri_decode(const char *s, int keep_reserved) {
     if (s[i] != '%') { buf[j++] = s[i]; continue; }
     if (i + 2 >= n || url_hexval(s[i + 1]) < 0 || url_hexval(s[i + 2]) < 0) {
       nt_exc_raise_msg("URIError: URI malformed");
+      free(buf);
       return url_empty();
     }
     unsigned char b = (unsigned char)(url_hexval(s[i + 1]) * 16 + url_hexval(s[i + 2]));
@@ -4636,6 +4680,7 @@ static const char *uri_decode(const char *s, int keep_reserved) {
   char *o = alloc_str(j);
   memcpy(o, buf, j);
   o[j] = 0;
+  free(buf);
   return o;
 }
 const char *nt_decode_uri_component(const char *s) { return uri_decode(s, 0); }

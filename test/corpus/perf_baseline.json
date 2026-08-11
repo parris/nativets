@@ -17,9 +17,9 @@
       "bytes": 33253
     },
     "csv.ts": {
-      "instrs": 508,
+      "instrs": 512,
       "funcs": 2,
-      "bytes": 31809
+      "bytes": 31955
     },
     "diff.ts": {
       "instrs": 331,
@@ -32,14 +32,14 @@
       "bytes": 40807
     },
     "jobs.ts": {
-      "instrs": 766,
+      "instrs": 796,
       "funcs": 10,
-      "bytes": 42271
+      "bytes": 43383
     },
     "json-pretty.ts": {
-      "instrs": 373,
+      "instrs": 403,
       "funcs": 3,
-      "bytes": 27144
+      "bytes": 28301
     },
     "life.ts": {
       "instrs": 485,
@@ -175,33 +175,33 @@
     "json-pretty.ts": {
       "arrLive": 5,
       "objLive": 2,
-      "strLive": 42,
+      "strLive": 9,
       "pvNodes": 0,
       "pvAllocs": 0
     }
   },
   "binarySize": {
     "darwin-arm64": {
-      "primes.ts": 167424,
-      "matrix.ts": 167824,
-      "sudoku.ts": 167776,
-      "life.ts": 167784,
-      "maze.ts": 187160,
-      "wordfreq.ts": 187264,
-      "stackvm.ts": 167472,
-      "json-pretty.ts": 167504
+      "primes.ts": 167520,
+      "matrix.ts": 167904,
+      "sudoku.ts": 167872,
+      "life.ts": 167880,
+      "maze.ts": 187256,
+      "wordfreq.ts": 187360,
+      "stackvm.ts": 167552,
+      "json-pretty.ts": 167600
     }
   },
   "textSize": {
     "darwin-arm64": {
-      "primes.ts": 96900,
-      "matrix.ts": 100328,
-      "sudoku.ts": 99992,
-      "life.ts": 99072,
-      "maze.ts": 118156,
-      "wordfreq.ts": 115852,
-      "stackvm.ts": 98860,
-      "json-pretty.ts": 98820
+      "primes.ts": 98052,
+      "matrix.ts": 101480,
+      "sudoku.ts": 101144,
+      "life.ts": 100224,
+      "maze.ts": 119308,
+      "wordfreq.ts": 117004,
+      "stackvm.ts": 100012,
+      "json-pretty.ts": 100464
     }
   },
   "anchors": {
