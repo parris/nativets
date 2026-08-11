@@ -113,10 +113,12 @@ function scanUsesActors(node: unknown): boolean {
  *      node's own behaviour — stderr and exit 1);
  *   2. the name is never used as a VALUE, so no closure or function-value call can reach
  *      it without a check (a lifted arrow is a frame this scan cannot see into);
- *   3. the thrown type is one the flag can actually carry (`string`, or a one-field
- *      `{message:string}`) and every covering `catch` binds exactly that type — the
- *      binding is not `any` here, and reconstructing a DIFFERENT shape into it is the
- *      raw-store bug `ThrowStmt` already refuses in-frame;
+ *   3. the thrown type is one the slot can actually carry (a `string`, or ANY object —
+ *      see `raisableTy`) and every covering `catch` binds exactly that type — the binding
+ *      is not `any` here, and reconstructing a DIFFERENT shape into it is the raw-store
+ *      bug `ThrowStmt` already refuses in-frame. This rule is also what lets the catch
+ *      site know WHICH mechanism carried the payload without asking the runtime: an
+ *      object-typed binding at an escaping call site is an object on the slot, always;
  *   4. no `throw` anywhere in the function is inside an arrow body, and the program uses
  *      no actors — an inlined arrow's `throw` really does run in this frame while a
  *      lifted one does not, and an actor handler is called by the scheduler, from no
@@ -127,19 +129,30 @@ function scanUsesActors(node: unknown): boolean {
  * propagate and the "escapes" set never grows transitively. A deeper chain keeps NT1004.
  * ========================================================================== */
 
-/** The type a raise can carry across a frame, or `null` if it cannot. These are exactly
- *  the two shapes `emitExcCheck` already reconstructs into a catch binding. The result is a
- *  `string` rather than a `Ty` so the empty string can be the "cannot" answer — unambiguous,
- *  since `Ty` has no empty spelling (which is also why tsc rejects `""` as one). */
+/** The type a raise can carry across a frame, or the empty string if it cannot. Two answers
+ *  now, and they are carried by two DIFFERENT mechanisms:
+ *
+ *    `string`  — the runtime's `const char *` message slot, refcounted, COPIED by reference.
+ *    an object — the object BLOCK POINTER, MOVED onto the slot (`nt_exc_raise_obj`) and
+ *                taken back off it by the catch (`nt_exc_take_object`).
+ *
+ *  The object answer has no shape condition at all, and that is the whole point of the move:
+ *  nothing is reconstructed, so no field of the payload has to be representable in the slot.
+ *  The rule this replaced admitted exactly one object shape — the single `{message:string}`
+ *  that `emitExcCheck` could rebuild by BOXING the message — and a previous lane measured
+ *  what widening that by flattening would buy on the linked stage-1 tree: 20 of 129 seed
+ *  functions for N flat scalar fields, and 20 for a deep recursive flatten, i.e. literally
+ *  nothing over flat, because `NTError.diag` carries an optional ARRAY no flattening
+ *  carries. Moving the pointer clears 82. Hence the pointer.
+ *
+ *  The result is a `string` rather than a `Ty` so the empty string can be the "cannot"
+ *  answer — unambiguous, since `Ty` has no empty spelling (which is also why tsc rejects
+ *  `""` as one). */
 function raisableTy(t: Ty | undefined): string {
   if (t === undefined) return "";
   const b: Ty = t;
   if (b === "string") return "string";
-  if (!isObjectTy(b) || objectFields(b).length !== 1) return "";
-  const f = fieldType(b, "message");
-  if (f === undefined) return "";
-  const ft: Ty = f;
-  return ft === "string" ? b : "";
+  return isObjectTy(b) ? b : "";
 }
 
 /** Uncovered `throw`s in ONE frame. `out` collects the raisable type of each throw that
@@ -844,6 +857,12 @@ class ModuleGen {
    *  `strlen` answering a length query. Declared conditionally for the same reason as the
    *  two above: every program that does NOT use it emits byte-identical IR. */
   usesStrScanned = false;
+
+  /** Set when a frame MOVED an object onto the pending-exception slot, or took one off it.
+   *  Declared conditionally for the same reason as the flags above: a program that carries
+   *  only string payloads — which is every program written before this — emits IR with not
+   *  one byte moved. */
+  usesExcObject = false;
   constructor(readonly functions: Map<string, Sig>, readonly globals: Map<string, Ty> = new Map()) {}
 
   /** `@nt.g.<name>` — the storage symbol of a promoted module-level binding. */
@@ -1043,6 +1062,8 @@ class ModuleGen {
       // else in the emitted IR ever raises (the runtime raises internally), so this one is
       // declared only where it is used.
       ...(this.usesUncaughtThrow ? ["declare void @nt_exc_raise_msg(ptr)"] : []),
+      // The MOVE pair. Only a program that carries an OBJECT across a frame mentions them.
+      ...(this.usesExcObject ? ["declare void @nt_exc_raise_obj(ptr, ptr)", "declare ptr @nt_exc_take_object()"] : []),
       ...(this.usesStrScanned ? ["declare double @nt_str_scanned()"] : []),
       "",
       ...this.strDefs,
@@ -3819,24 +3840,32 @@ class FnGen {
    * After a fallible runtime call, branch to the innermost catch (clearing the
    * pending flag) if an exception was raised; at top level, abort (exit 1). Keeps
    * the lexical throw model — no unwinder — while making runtime throws catchable.
+   *
+   * `objectPayload` says the callee was PROVED to MOVE an object onto the pending slot
+   * rather than raise a bare message — true only at a call to a `scanEscaping` callee
+   * whose covering `catch` binds that same object type (rule 3), which is what lets this
+   * choose the take-the-object arm with no runtime test. False for every HOST call, and
+   * that is not a conservatism but a fact about them: `JSON.parse` and `fs` have a message
+   * and no typed object to hand over.
    */
-  private emitExcCheck(): void {
+  private emitExcCheck(objectPayload = false): void {
     // Same refusal as `ThrowStmt`, for the same reason: a host failure inside a
     // `finally`-only `try` has no catch block to branch to. Raised BEFORE the check is
     // emitted, so no half-formed branch survives.
     if (this.escapesCatchlessTry()) throw this.catchlessTryError("a call that can raise");
-    // …and the same discipline for a payload the flag cannot carry. The pending slot is
-    // ONE `const char *`, so the arms below can rebuild a binding for exactly two shapes:
-    // a `string`, and the one-field `{message:string}` the message is boxed into. Under
-    // any OTHER object type this stored NOTHING and branched to the handler regardless,
-    // leaving the binding at whatever its uninitialised alloca held — which the handler
-    // then read as an object pointer. That is a silent wrong answer with a ZERO exit code
-    // (measured: node "Thrown\nSyntaxError", ours "Thrown\n\xef\xbf\xbd", both exit 0),
-    // not a crash and not a diagnostic. Refuse it. Raised BEFORE anything is emitted.
+    // …and the same discipline for a payload THIS call site cannot deliver. A MESSAGE-only
+    // raise — every host call's, and `objectPayload` is exactly the flag that says this is
+    // not one — can rebuild a binding of two shapes only: a `string`, and the one-field
+    // `{message:string}` the message is boxed into. Under any OTHER object type this stored
+    // NOTHING and branched to the handler regardless, leaving the binding at whatever its
+    // uninitialised alloca held — which the handler then read as an object pointer. That is
+    // a silent wrong answer with a ZERO exit code (measured: node "Thrown\nSyntaxError",
+    // ours "Thrown\n\xef\xbf\xbd", both exit 0), not a crash and not a diagnostic. Refuse
+    // it. Raised BEFORE anything is emitted.
     const hh = this.innermostHandler();
-    if (hh !== null && hh.excVar !== null && hh.eType !== "string" && hh.eType !== "{message:string}") {
+    if (!objectPayload && hh !== null && hh.excVar !== null && hh.eType !== "string" && hh.eType !== "{message:string}") {
       throw nyi(NYI.EXCEPTION, `a call that can raise inside a \`try\` whose \`catch (${hh.excVar})\` is ${hh.eType}, which the pending-exception flag cannot rebuild`,
-        "a raise crosses a frame on a slot that holds ONE string, so a `catch` binding can only be rebuilt from it as a `string` or as `{message:string}` (what `new Error(msg)` is here) — and this handler binds neither, so the runtime has no value to give it. Move the call that can raise OUT of this `try`, or give the raising code a `try` of its own whose `catch` binds one of those two shapes");
+        "a HOST call raises ONE string — the runtime has no typed object to hand over — so a `catch` binding it reaches can only be rebuilt as a `string` or as `{message:string}` (what `new Error(msg)` is here), and this handler binds neither. (A USER function's `throw` of this type does cross a frame: the object itself is moved.) Move the call that can raise OUT of this `try`, or give the raising code a `try` of its own whose `catch` binds one of those two shapes");
     }
     const p = this.fresh();
     this.emit(`${p} = call i32 @nt_exc_pending()`);
@@ -3849,7 +3878,21 @@ class FnGen {
     // See the ThrowStmt case above: an empty handler stack must not become index -1.
     const h = this.innermostHandler();
     if (h) {
-      if (h.excVar && h.eType === "string") {
+      if (h.excVar && objectPayload && isObjectTy(h.eType)) {
+        // THE MOVE, RECEIVED. `nt_exc_take_object` NULLs the runtime's slot, so this store
+        // makes the binding the object's single owner and the `nt_exc_clear` two lines
+        // below frees nothing. Nothing is copied and nothing is rebuilt: the pointer the
+        // raising frame allocated is the pointer the handler reads, so a nested field of
+        // any shape — an array, another object — arrives intact, and no aliasing this
+        // could not see can double-free it. The handler's drop set frees it exactly once
+        // (ownership.ts's `TryStmt` case already makes an object-typed catch binding an
+        // owner), and the `store ptr null` on entry to the `try` is what keeps the
+        // never-stored path from freeing an uninitialised alloca.
+        this.mod.usesExcObject = true;
+        const o = this.fresh();
+        this.emit(`${o} = call ptr @nt_exc_take_object()`);
+        this.emit(`store ptr ${o}, ptr ${this.addr(h.excVar)}`);
+      } else if (h.excVar && h.eType === "string") {
         const m = this.fresh();
         this.emit(`${m} = call ptr @nt_exc_message()`);
         // The binding is a STRING LOCAL, released at scope exit — so it needs its own
@@ -3936,19 +3979,21 @@ class FnGen {
    *
    * THE DROP SET IS THE WHOLE COST, and it is `ReturnStmt`'s: leaving by a `ret` means
    * freeing exactly what a `return` written at this point would free. `ThrowStmt.drops`
-   * is the ownership pass's `ownedInScope` at the throw, the same annotation and the same
-   * one-line computation `ReturnStmt.drops` already uses — no second analysis, and no
-   * "the unwinder leaks by construction" that a `longjmp` past these frames would have.
+   * is the ownership pass's `ownedInScope` at the throw, MINUS the thrown value, which the
+   * raise has moved — the same annotation and the same one-line computation
+   * `ReturnStmt.drops` already uses, no second analysis, and no "the unwinder leaks by
+   * construction" that a `longjmp` past these frames would have.
    *
    * The message is RETAINED by `nt_exc_raise_msg` before the drops run, so a message
    * string this frame owns (`throw `bad: ${x}`;`) survives its own release. A literal is
    * untracked and the retain is a no-op, which is why nothing else's behaviour moves.
    *
-   * Returns false for a thrown value with no message string — the caller then keeps the
-   * NT1004 refusal rather than inventing text, exactly as `genUncaught` does.
+   * Returns false for a thrown value the slot cannot carry — the caller then keeps the
+   * NT1004 refusal rather than inventing a payload, exactly as `genUncaught` does.
    */
   private genPropagate(s: ThrowStmt): boolean {
     const v = this.genExpr(s.argument);
+    if (isObjectTy(v.ty)) return this.genPropagateObject(s, v);
     const msg = this.raisedMessage(v);
     if (msg === "") return false;
     this.mod.usesUncaughtThrow = true;
@@ -3966,6 +4011,33 @@ class FnGen {
     }
     // `nt_obj_free` is SHALLOW, so freeing a thrown `new Error(m)` here does not touch
     // the message the raise just retained.
+    this.emitDrops(s.drops ?? []);
+    this.emitStrDrops();
+    this.terminate(this.retTy === "void" ? "ret void" : `ret ${llvmTy(this.retTy)} ${defaultZero(this.retTy)}`);
+    return true;
+  }
+
+  /**
+   * The OBJECT half of `genPropagate` — the move. `nt_exc_raise_obj` takes the object block
+   * pointer, and from that call until a `catch` runs `nt_exc_take_object` the runtime slot
+   * is its ONE owner: `ThrowStmt.drops` has already had the thrown name subtracted from it
+   * (ownership.ts), so the drop set below cannot free it, and no copy exists to go stale.
+   * That is the property flattening could not have: a `diag: {code, spans?: DiagSpan[]}`
+   * nested three deep arrives byte-identical because it is never walked.
+   *
+   * The message is passed ALONGSIDE, borrowed out of the object's own `message` slot, and
+   * only so an UNCAUGHT raise can name itself on stderr (`nt_exc_abort`). It is `null` for
+   * an object that carries no `message: string`, which is a payload the old rule refused
+   * outright — the object no longer has to have one, because nothing is rebuilt from it.
+   *
+   * Always true: unlike the message path there is no shape that can fail here, and
+   * `scanEscaping` has already established (rule 3) that every covering `catch` binds
+   * exactly this object type.
+   */
+  private genPropagateObject(s: ThrowStmt, v: Val): boolean {
+    this.mod.usesExcObject = true;
+    const msg = this.raisedMessage(v); // "" — and so `null` — when there is no message field
+    this.emit(`call void @nt_exc_raise_obj(ptr ${v.v}, ptr ${msg === "" ? "null" : msg})`);
     this.emitDrops(s.drops ?? []);
     this.emitStrDrops();
     this.terminate(this.retTy === "void" ? "ret void" : `ret ${llvmTy(this.retTy)} ${defaultZero(this.retTy)}`);
@@ -6691,6 +6763,13 @@ class FnGen {
     // `catch`. Emitting it is not optional — `scanEscaping` only admits a callee whose
     // every call site checks, so this line is the other half of that proof.
     const raises = this.mod.escaping.has(name);
+    // A PROVED-escaping callee whose covering `catch` binds an OBJECT is one that moved the
+    // object onto the pending slot (`scanEscaping` rule 3 makes those two the same type), so
+    // the check takes it rather than rebuilding a binding from the message. `false` at every
+    // host call site, which is a fact about them and not a conservatism: the runtime raises
+    // a `const char *` and has no typed object to hand over.
+    const h = this.innermostHandler();
+    const objPayload = raises && h !== null && h.excVar !== null && isObjectTy(h.eType);
     if (sig.rest) {
       const fixed = sig.params.length - 1;
       //@@mutable
@@ -6704,10 +6783,10 @@ class FnGen {
       for (let i = fixed; i < args.length; i++) this.emit(`call double @nt_arr_push(ptr ${arr}, i64 ${this.toSlot(this.genExpr(args[i]!))})`);
       argVals.push(`ptr ${arr}`);
       const argstr = argVals.join(", ");
-      if (sig.ret === "void") { this.emit(`call void @${userSym(name)}(${argstr})`); if (raises) this.emitExcCheck(); return { v: "", ty: "void" }; }
+      if (sig.ret === "void") { this.emit(`call void @${userSym(name)}(${argstr})`); if (raises) this.emitExcCheck(objPayload); return { v: "", ty: "void" }; }
       const t = this.fresh();
       this.emit(`${t} = call ${llvmTy(sig.ret)} @${userSym(name)}(${argstr})`);
-      if (raises) this.emitExcCheck();
+      if (raises) this.emitExcCheck(objPayload);
       return { v: t, ty: sig.ret };
     }
     //@@mutable
@@ -6722,12 +6801,12 @@ class FnGen {
     const argstr = argVals.map((v, i) => `${llvmTy(sig.params[i]!)} ${v}`).join(", ");
     if (sig.ret === "void") {
       this.emit(`call void @${userSym(name)}(${argstr})`);
-      if (raises) this.emitExcCheck();
+      if (raises) this.emitExcCheck(objPayload);
       return { v: "", ty: "void" };
     }
     const t = this.fresh();
     this.emit(`${t} = call ${llvmTy(sig.ret)} @${userSym(name)}(${argstr})`);
-    if (raises) this.emitExcCheck();
+    if (raises) this.emitExcCheck(objPayload);
     return { v: t, ty: sig.ret };
   }
 }

@@ -461,7 +461,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // Followed lexer.ts off `.push` onto lexer.ts's NT2001. parser.ts's own 18
   // `this.<field>` push sites are NOT cleared — a field names no binding the ownership
   // pass can prove unique, so they stay NT1606 behind this.
-  "parser.ts": { rung: 0, code: "NT2001", blame: "self" },
+  "parser.ts": { rung: 0, code: "NT1014", blame: "self" },
   // THE CRUX MOVED, then moved again. `Record<string, number | "var">` compiles, so
   // checker.ts left NT1009; it then stopped on `delete o.k` (NT1606), which the delete
   // lane established must STAY refused — node distinguishes an absent key from a
@@ -531,7 +531,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // Both rows moved to their real blockers, and the blame column is the interesting part:
   // coverage.ts is clean on its own and inherits ast.ts's, exactly as this file predicted
   // below; coverage-preprocess.ts finally has one of its OWN.
-  "coverage.ts": { rung: 0, code: "NT2001", blame: "parser.ts" },
+  "coverage.ts": { rung: 0, code: "NT1014", blame: "parser.ts" },
   // Still inherits checker.ts's blocker, and has now followed it through THREE codes —
   // NT1009 -> NT1606 -> NT1027 — without ever having a blocker of its own under the link.
   // The long-standing "ownership.ts is credited with checker.ts's problem" attribution
@@ -549,7 +549,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // column, and clearing it makes that column BLIND: what it reports now is the unlinked-import
   // artifact (see the ratchet baseline). Linked, it still inherits, as it always has.
   "ownership.ts": { rung: 0, code: "NT2001", blame: "checker.ts" },
-  "driver.ts": { rung: 0, code: "NT2001", blame: "parser.ts" },
+  "driver.ts": { rung: 0, code: "NT1014", blame: "parser.ts" },
   // Stage-1's entry point now stops on its OWN code for the first time: calling the async
   // `buildBinary` without `await`. Not a dependency's blocker.
   //
@@ -578,14 +578,14 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // reflective `mapTypesDeep`. NT2001 is now EMPTY tree-wide — cli.ts was its last holder,
   // and it only ever held it because this lane had not landed yet. Sixth time a merge here
   // produced a frontier neither side could have computed from its own diff.
-  "cli.ts": { rung: 0, code: "NT2001", blame: "parser.ts" },
+  "cli.ts": { rung: 0, code: "NT1014", blame: "parser.ts" },
   // Followed parser.ts through the link: when parser.ts stopped blaming itself, the three
   // modules that inherited its `?.[]` all moved to ast.ts's NT1030 together.
   // Followed ast.ts off the entries form onto ast.ts's `HOST_MODULES` Record literal.
   // Followed lexer.ts off `.push` onto lexer.ts's NT2001. Its own accumulators are pushed
   // from inside CAPTURING arrows (`const walk = (list) => { out.push(…) }`), which the
   // accumulator opt-in refuses — see the closure rule in src/ownership.ts.
-  "modules.ts": { rung: 0, code: "NT2001", blame: "parser.ts" },
+  "modules.ts": { rung: 0, code: "NT1014", blame: "parser.ts" },
   // `line++` inside `advance` — a write to a captured binding, the SAME blocker lexer.ts
   // sat on for two rounds. Its own, not inherited: this module is now a true leaf, since
   // the type-only import cycle that used to mask it moved out of the way.
@@ -723,7 +723,7 @@ const STAGE1: Entry = { file: "cli.ts", path: () => pathOf("cli.ts"), argv: () =
 // (`unionCommonField`). Stage-1 inherits ast.ts's `exprLoc` either way: the blocker moved
 // 22 lines down that one function, from the `e.left` read to the `.map` over its own
 // recursive calls. Still rung 0, still nine modules — the conjunction, again.
-const STAGE1_BASELINE: { rung: Rung; code: string } = { rung: 0, code: "NT2001" };
+const STAGE1_BASELINE: { rung: Rung; code: string } = { rung: 0, code: "NT1014" };
 
 describe("SH6: the instrument itself — the upper rungs are exercised, not dead code", () => {
   /**
@@ -1370,8 +1370,26 @@ describe("SH6: differential self-compilation (bun-run compiler is the oracle)", 
       // Stage-1 now stops on `walk(s.body)` across a 6-member union where only the shared
       // tag is readable. Note this had been recorded as NT1607 (a capturing `out.push`);
       // that was wrong and relayed to two lanes before being measured.
-      expect(m.error).toContain("does not exist on");
-      expect(m.code).toBe("NT2001");
+      // THIRTY-FIRST — and this one is the first STRUCTURAL unblock, not another shuffle.
+      // `tokenize`'s `catch (e) { e.message }` is gone, because a cross-frame `throw` can
+      // now carry an OBJECT: the runtime's pending slot holds a pointer whose single owner
+      // is TRANSFERRED (raise hands it over, `catch` takes it and NULLs the slot, `clear`
+      // frees only what nobody took), so nothing is copied and nested fields are never
+      // walked. The exact self-hosting shape -- `lex()` throws a class instance and
+      // `tokenize()` catches it and reads `.message`/`.name` -- now matches node
+      // byte-for-byte, where the base refused it.
+      //
+      // `SEED w/ CARRIABLE` went 7 -> 84 (test/escape-metric.ts). Flattening the payload
+      // into N scalar fields was PRICED FIRST and reaches only 20; a deep recursive flatten
+      // reaches 20 as well -- literally zero more -- because `NTError.diag` carries an
+      // optional ARRAY. Pointer-move was the only design that pays.
+      //
+      // Stage-1 now stops on `new Set<Expr>()` -- a Set whose element type is the
+      // discriminated union. Still rung 0: the one-frame restriction is untouched, so
+      // `…already covered` is still 16 of 1208 and transitive propagation is next. Its
+      // ceiling is now 84 instead of 7.
+      expect(m.error).toContain("Set of");
+      expect(m.code).toBe("NT1014");
       return;
     }
 

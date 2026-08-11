@@ -139,18 +139,38 @@ describe("no internal error reaches the user", () => {
   // throw is in a CALLEE and the `try` is at the call site, so the exception has to
   // leave a frame. The other half — a throw NOBODY can catch — now compiles and is
   // node-differential in test/uncaught-throw.test.ts (it is just `exit 1`).
+  //
+  // TWO OF THE FOUR MOVED OUT, to the block below: `try { f() } catch (e)` where `f`
+  // raises an object now COMPILES. The blocker was never the payload alone — the catch
+  // binding took its type from the try block's OWN throws, so the plain idiom bound
+  // `"string"` and `scanEscaping` rule 3 rejected the raise. `inferThrowType` asks the
+  // block's callees too, and the object crosses the frame by MOVE (test/exc-move.test.ts).
   const THROWS: [string, string][] = [
-    // The ordinary idiom: raise in the callee, handle at the call site.
-    ["function throws, try at the CALL SITE", `function f(): number { throw new Error("boom"); }\ntry { console.log(f()); } catch (e) { console.log("caught"); }\n`],
+    // A METHOD call: `calleesOf` resolves only IDENTIFIER callees, because a method
+    // resolves by PROPERTY name and every same-named method in the program would have to
+    // agree. So the binding is still untyped here, and the raise still cannot cross.
     ["method throws, try at the call site", `class C { m(): number { throw new Error("b"); } }\ntry { console.log(new C().m()); } catch (e) { console.log("caught"); }\n`],
+    // A LIFTED arrow's throw runs in a frame the escape scan is not describing (rule 4).
     ["throw from an arrow", `const f = (): number => { throw new Error("b"); };\ntry { console.log(f()); } catch (e) { console.log("c"); }\n`],
-    // A rethrow out of a callee's catch, with the outer handler one frame up.
-    ["rethrow from a callee's catch block", `function f(): number { try { throw new Error("a"); } catch (e) { throw new Error("b"); } }\ntry { console.log(f()); } catch (e) { console.log("c"); }\n`],
   ];
   for (const [name, src] of THROWS) {
     test(`NT1004, not a stack trace: ${name}`, () => {
       const { out, code } = cliEmit(src);
       expectClean(out, code, "NT1004");
+    });
+  }
+
+  // THE TWO THAT NOW COMPILE. node is the oracle again for these — it always ran them —
+  // and both were verified against it: "caught" / exit 0, and "c" / exit 0.
+  const NOW_COMPILES: [string, string][] = [
+    ["function throws, try at the CALL SITE", `function f(): number { throw new Error("boom"); }\ntry { console.log(f()); } catch (e) { console.log("caught"); }\n`],
+    ["rethrow from a callee's catch block", `function f(): number { try { throw new Error("a"); } catch (e) { throw new Error("b"); } }\ntry { console.log(f()); } catch (e) { console.log("c"); }\n`],
+  ];
+  for (const [name, src] of NOW_COMPILES) {
+    test(`no longer NT1004 — the object crosses the frame: ${name}`, () => {
+      const { out, code } = cliEmit(src);
+      expect(code).toBe(0);
+      expect(out).not.toContain("error[");
     });
   }
 

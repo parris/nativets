@@ -1,7 +1,7 @@
 {
   "recordedAt": {
     "date": "2026-08-11",
-    "rev": "f954678"
+    "rev": "908961b"
   },
   "modules": {
     "ast.ts": {
@@ -18,7 +18,7 @@
       }
     },
     "checker.ts": {
-      "sha256": "cc63f0fef2f42a63",
+      "sha256": "7a1dc66af23e912d",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -40,12 +40,12 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Property 'message' does not exist on string at L:C"
+        "code": "NT1014",
+        "message": "[NT1014] Set of U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Ustring}|{kind:\"TemplateLiteral\",quasis:strin…"
       }
     },
     "codegen.ts": {
-      "sha256": "abaebb3b5707e062",
+      "sha256": "bafa3275bed2b781",
       "standalone": {
         "stage": "check",
         "code": "NT1012",
@@ -80,8 +80,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Property 'message' does not exist on string at L:C"
+        "code": "NT1014",
+        "message": "[NT1014] Set of U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Ustring}|{kind:\"TemplateLiteral\",quasis:strin…"
       }
     },
     "diagnostics.ts": {
@@ -107,8 +107,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Property 'message' does not exist on string at L:C"
+        "code": "NT1014",
+        "message": "[NT1014] Set of U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Ustring}|{kind:\"TemplateLiteral\",quasis:strin…"
       }
     },
     "lexer.ts": {
@@ -133,12 +133,12 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Property 'message' does not exist on string at L:C"
+        "code": "NT1014",
+        "message": "[NT1014] Set of U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Ustring}|{kind:\"TemplateLiteral\",quasis:strin…"
       }
     },
     "ownership.ts": {
-      "sha256": "870b0ea15c3833dd",
+      "sha256": "fd95f26f4178faba",
       "standalone": {
         "stage": "check",
         "code": "NT1003",
@@ -152,7 +152,7 @@
       }
     },
     "parser.ts": {
-      "sha256": "025ea6375ce804f2",
+      "sha256": "477c4a423b0b2c74",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -160,8 +160,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Property 'message' does not exist on string at L:C"
+        "code": "NT1014",
+        "message": "[NT1014] Set of U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Ustring}|{kind:\"TemplateLiteral\",quasis:strin…"
       }
     }
   }
