@@ -1144,11 +1144,20 @@ class Analyzer {
           return;
         }
         if (consume && this.globalBorrows.has(e.name)) {
+          // The borrow the rewrite should reach for depends on what the binding IS, and a
+          // hint that suggests `for (const v of …)` over an OBJECT is advice that does not
+          // compile. Every rewrite below is exercised against node in
+          // test/global-return.test.ts — this file's refusals have shipped lying hints
+          // before, and an unverified one is worth less than no hint.
+          const arrayLike = e.ty !== undefined && isArrayTy(e.ty);
+          const borrowExample = arrayLike
+            ? `\`for (const v of ${e.name})\` and \`return ${e.name}.length\``
+            : `\`return ${e.name}.field\``;
           this.report({
             code: OWN_CODES.MOVE_OUT_OF_BORROW,
             message: `cannot move out of \`${e.name}\`: it is a module-level binding, and the module still owns it`,
             line: e.loc?.line ?? 0,
-            hint: `a module-level \`const\`/\`let\` lives until the program ends and is freed there, so handing it out of a function makes the receiver a SECOND owner and the same pointer is freed twice. Read through it instead — \`return ${e.name}.field\` and \`for (const v of ${e.name})\` are borrows and stay legal — or build and return a new value. If the value really belongs to the caller, declare it inside the function and return it from there`,
+            hint: `a module-level \`const\`/\`let\` lives until the program ends and is freed there, so handing it out of a function makes the receiver a SECOND owner and the same pointer is freed twice — a double free that prints nothing at all, because the allocator's abort discards buffered stdout. Read THROUGH it instead: ${borrowExample} are borrows and stay legal. Otherwise build and return a new value, or — if the value really belongs to the caller — declare it inside the function and return it from there`,
           });
           return;
         }
