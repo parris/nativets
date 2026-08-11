@@ -2388,9 +2388,25 @@ class FnGen {
     return t;
   }
 
-  /** Coerce any value to a `double` (JS ToNumber for the supported types). */
+  /**
+   * Coerce a value to a `double` — JS ToNumber, for the types `checkNumberCoercion`
+   * (src/checker.ts) admits.
+   *
+   * `NaN` is the LAST case, not the default one. This used to end in a bare
+   * `return llvmDouble(NaN)`, and the checker returned `number` for every `+` operand
+   * without looking at one, so the fall-through was reached by ordinary code and answered
+   * a number node does not print, at exit 0: `+new Date(1000)` was NaN (node 1000), `+[]`
+   * was NaN (node 0), `+[1]` was NaN (node 1) and a `number | null` holding null was NaN
+   * (node 0). Anything not on the list below is refused in the checker now, and reaching
+   * this line with it is a compiler bug rather than the user's problem.
+   */
   private coerceToNumber(val: Val): string {
     if (val.ty === "number") return val.v;
+    // A Date IS its time value (a `double`), and ToNumber of a Date is exactly that value:
+    // `ToPrimitive(d, number)` runs `valueOf` FIRST. The string hint would run `toString`
+    // and give the weekday form instead, which is why `"" + date` stays refused (NT1024)
+    // while this is the identity. `%d` in console.log already had this rule.
+    if (isDateTy(val.ty)) return val.v;
     if (val.ty === "string") {
       const t = this.fresh();
       this.emit(`${t} = call double @js_str_to_num(ptr ${val.v})`);
@@ -2402,7 +2418,51 @@ class FnGen {
       return t;
     }
     if (val.ty === "null") return llvmDouble(0);
-    return llvmDouble(NaN); // undefined
+    if (val.ty === "undefined" || val.ty === "void") return llvmDouble(NaN);
+    // A nullable BOX branches on its TAG, and the two nullish answers DIFFER — `null` is 0
+    // and `undefined` is NaN — so this cannot be folded into a single constant. The raw
+    // box reaching the fall-through is what made `const n: number | null = null; +n` NaN.
+    if (isNullableTy(val.ty)) return this.coerceToNumberNullable(val.v, baseTy(val.ty), nullishKind(val.ty));
+    // An ARRAY has no `valueOf`, so ToNumber is StringToNumber of its `toString` — which
+    // IS `join(",")`. `[]` gives `""` → 0 and `[1]` gives `"1"` → 1, both of which node
+    // prints and the fall-through did not. Only the element types `joinFn` renders exactly
+    // reach here; the checker refuses the rest, so this is not a fallback.
+    if (isArrayTy(val.ty)) {
+      // The join allocates, and `js_str_to_num` only READS it — so this frame is the last
+      // owner and the buffer is dead on the next instruction. Released here for the same
+      // reason `releaseTemp` releases a concat operand: without it `+arr` in a loop would
+      // leak one string per iteration, which is the residue shape test/fuzz2-diff.test.ts
+      // measures.
+      const s = this.coerceToString(val);
+      const t = this.fresh();
+      this.emit(`${t} = call double @js_str_to_num(ptr ${s})`);
+      this.emit(`call void @nt_str_release(ptr ${s})`);
+      return t;
+    }
+    throw internalError(`coerceToNumber of ${val.ty} (the checker should have refused it — see NYI.TONUMBER)`);
+  }
+
+  /** node's ToNumber of a nullable box: 0 when `null`, NaN when `undefined`, else the
+   *  value's own coercion. Branched rather than computed unconditionally because the
+   *  absent case's value slot is 0, and unpacking that as a string would hand
+   *  `js_str_to_num` a null pointer. */
+  private coerceToNumberNullable(ptr: string, base: Ty, which: "undefined" | "null"): string {
+    const slot = this.slot("number");
+    const present = this.fresh();
+    this.emit(`${present} = icmp eq i64 ${this.nullTag(ptr)}, 2`);
+    const pLbl = this.label("cnp"), aLbl = this.label("cna"), end = this.label("cne");
+    this.terminate(`br i1 ${present}, label %${pLbl}, label %${aLbl}`);
+    this.to(this.block(pLbl));
+    const inner = this.coerceToNumber({ v: this.fromSlot(this.nullVal(ptr), base), ty: base });
+    this.emit(`store double ${inner}, ptr ${slot}`);
+    this.terminate(`br label %${end}`);
+    this.to(this.block(aLbl));
+    this.emit(`store double ${llvmDouble(which === "null" ? 0 : NaN)}, ptr ${slot}`);
+    this.terminate(`br label %${end}`);
+    this.to(this.block(end));
+    const t = this.fresh();
+    this.emit(`${t} = load double, ptr ${slot}`);
+    return t;
   }
 
   /** Pack a value into a 64-bit array slot. */
@@ -3169,6 +3229,16 @@ class FnGen {
           }
           const l = this.genExpr(e.left);
           const r = this.genExpr(e.right);
+          // Unit types, BEFORE a register is allocated: every value of `undefined` is THE
+          // undefined and every value of `null` is THE null, so equality is a CONSTANT —
+          // node's `null === null` is `true`. (The checker already refused the mixed pair,
+          // so reaching here means both sides are the same unit type.) These used to fall
+          // all the way into the `js_str_eq` arm below and hand it an `i8`, which made
+          // `const a = null; const b = null; a === b` a clang error naming an SSA register
+          // rather than the `true` node prints. Both operands are still evaluated above,
+          // for their side effects.
+          if (lt === "undefined" || lt === "null" || lt === "void")
+            return { v: op === "===" || op === "==" ? "true" : "false", ty: "boolean" };
           const t = this.fresh();
           if (lt === "number") {
             this.emit(`${t} = fcmp ${FCMP.get(op)!} double ${l.v}, ${r.v}`);
@@ -3185,6 +3255,14 @@ class FnGen {
             this.emit(`${c} = call i32 @js_str_cmp(ptr ${l.v}, ptr ${r.v})`);
             this.emit(`${t} = icmp ${op === "<" ? "slt" : op === "<=" ? "sle" : op === ">" ? "sgt" : "sge"} i32 ${c}, 0`);
           } else {
+            // The BYTE-WISE arm, and it is only correct for a `ptr`. This was the plain
+            // `else` — the DEFAULT — so every type whose representation is not a pointer
+            // reached it and handed a `double`/`i1`/`i8` to a `ptr` parameter: `date ===
+            // date` emitted `js_str_eq(ptr <double>)` and came back to the user as a raw
+            // clang error with no NT code and no hint. The guard makes any remaining
+            // member of that class a loud compiler bug report instead, naming the type.
+            if (llvmTy(lt) !== "ptr")
+              throw internalError(`\`${op}\` on ${lt}, whose representation is \`${llvmTy(lt)}\` and not a pointer — the checker should have refused it, or this chain needs an arm for it`);
             const eq = this.fresh();
             this.emit(`${eq} = call i32 @js_str_eq(ptr ${l.v}, ptr ${r.v})`);
             this.emit(`${t} = icmp ${op === "===" || op === "==" ? "ne" : "eq"} i32 ${eq}, 0`);
@@ -3845,11 +3923,41 @@ class FnGen {
       if (isDateTy(recv.ty)) {
         const p = e.callee.property;
         if (p === "getTime" || p === "valueOf") return { v: recv.v, ty: "number" };
-        if (p === "toISOString" || p === "toJSON") {
+        if (p === "toISOString") {
           const t = this.fresh();
           this.emit(`${t} = call ptr @nt_date_to_iso(double ${recv.v})`);
           this.emitExcCheck();
           return { v: t, ty: "string" };
+        }
+        // `toJSON` used to share the line above, which is what made an Invalid Date's
+        // `.toJSON()` THROW. 21.4.4.37 tests the time value at step 3 and returns `null`
+        // for a non-finite one, so step 4's `toISOString` invocation is never reached and
+        // the method cannot throw — hence `string | null`, and hence the BRANCH: the ISO
+        // call is fallible, so it may only be evaluated on the finite side.
+        if (p === "toJSON") {
+          const slot = this.slot("string");
+          const nan = this.fresh();
+          this.emit(`${nan} = fcmp uno double ${recv.v}, ${recv.v}`);
+          const nLbl = this.label("tjn"), vLbl = this.label("tjv"), end = this.label("tje");
+          this.terminate(`br i1 ${nan}, label %${nLbl}, label %${vLbl}`);
+          this.to(this.block(vLbl));
+          const iso = this.fresh();
+          this.emit(`${iso} = call ptr @nt_date_to_iso(double ${recv.v})`);
+          this.emit(`store ptr ${iso}, ptr ${slot}`);
+          this.terminate(`br label %${end}`);
+          this.to(this.block(nLbl));
+          this.emit(`store ptr null, ptr ${slot}`);
+          this.terminate(`br label %${end}`);
+          this.to(this.block(end));
+          const got = this.fresh();
+          this.emit(`${got} = load ptr, ptr ${slot}`);
+          const isNull = this.fresh();
+          this.emit(`${isNull} = icmp eq ptr ${got}, null`);
+          const tag = this.fresh();
+          this.emit(`${tag} = select i1 ${isNull}, i64 1, i64 2`); // 1 = null, 2 = present
+          const val = this.fresh();
+          this.emit(`${val} = ptrtoint ptr ${got} to i64`);
+          return { v: this.nullBox(tag, val), ty: makeNullable("null", "string") };
         }
         const g = DATE_GETTERS.get(p)!;
         const t = this.fresh();
@@ -5642,6 +5750,17 @@ class FnGen {
         case "SwitchStmt": for (const c of s.cases) acc = this.collectBoundNames(c.body, acc); break;
         case "BlockStmt": acc = this.collectBoundNames(s.body, acc); break;
         case "MultiStmt": acc = this.collectBoundNames(s.stmts, acc); break;
+        // A nested `function f()` binds `f` in the arrow's scope exactly as a `let` does.
+        // Unreachable as a miscompile today only because any REFERENCE to a nested function
+        // is NT1003 ("function values / unknown callee") — the declaration itself compiles
+        // fine, so the binding is already in the tree. Missing it here is the same shape as
+        // the `name2` bug: two inlined callbacks in one frame would both keep the source
+        // name `f`. It also feeds `childRenameMap`, where the omission is a SHADOWING miss —
+        // an inner `function f` would not mask an outer `f`, so the inner body's references
+        // would be rewritten to the outer's fresh name. Collected here for the same reason
+        // `BlockDrops` is renamed in `subStmt`: it costs nothing and stops this being a live
+        // miscompile the day nested functions become callable.
+        case "FuncDecl": acc = acc.add(s.name); break;
         case "TryStmt":
           if (s.param) acc = acc.add(s.param);
           acc = this.collectBoundNames(s.block, acc);
