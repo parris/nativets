@@ -545,13 +545,13 @@ class Parser {
   private promiseParamsByFn = new Map<string, number[]>();
   /** Filled by whichever parameter list was parsed last; read immediately after. */
   private lastPromiseParams: number[] = [];
-  private lastPromiseParamNames = new Set<string>();
+  private lastPromiseParamNames: string[] = [];   // `string[]` — it feeds `asyncParamScopes`
   /** SCOPED, unlike `asyncFns`. A parameter name is not a module-level fact: two unrelated
    *  functions both taking an `f` — one `() => Promise<number>`, one `() => number` — must
    *  not contaminate each other, and putting parameters in the flat set did exactly that
    *  (`twice(f: () => number) { return f() + f(); }` was rejected because a DIFFERENT
    *  function's `f` was promise-typed). One frame per function/arrow body being parsed. */
-  private asyncParamScopes: Set<string>[] = [];
+  private asyncParamScopes: string[][] = [];   // `string[][]` — see `typeParamScopes`
   /** Every argument position that hands a function value to a call, checked once the whole
    *  file is parsed — declarations hoist, so neither the callee nor an `async function`
    *  argument is necessarily known yet at the call site. `scopedAsync` is the part that
@@ -710,6 +710,7 @@ class Parser {
     let pending = [...this.typeDeclStarts.keys()];
     let blocker = new Map<string, string>(); // name -> the unresolved type it stopped on
     while (pending.length) {
+      //@@mutable
       const deferred: string[] = [];
       for (const name of pending) {
         const sub = new Parser(this.toks, { typeEnv: this.typeAliases, file: this.file });
@@ -738,7 +739,13 @@ class Parser {
         } catch (e) {
           if (e instanceof NTError && e.diag.code === NYI.FORWARD_TYPE.code) {
             deferred.push(name);
-            if (sub.blockedOn !== undefined) blocker = blocker.set(name, sub.blockedOn);
+            // Bound to a LOCAL first, so the guard narrows the thing that is read. The
+            // direct `if (sub.blockedOn !== undefined) … sub.blockedOn` is `.set value
+            // expects string, got ?Ustring` here — narrowing needs a stable access path
+            // and a field of another object is not one (docs/self-hosting.md). This was
+            // the first blocker of five of the twelve modules.
+            const why = sub.blockedOn;
+            if (why !== undefined) blocker = blocker.set(name, why);
           }
           // any other refusal — leave it to the main parse, where it belongs
         }
@@ -812,6 +819,7 @@ class Parser {
     let pending = names;
     while (pending.length) {
       //@@mutable
+      //@@mutable
       const deferred: string[] = [];
       let why = new Map<string, string>(); // residual member -> the error it stalled with
       for (const name of pending) {
@@ -836,7 +844,18 @@ class Parser {
           parsed = true;
         } catch (e) {
           deferred.push(name); // may only need a member that has not settled yet
-          why = why.set(name, String((e as { message?: string }).message ?? e).split("\n")[0]!);
+          // `e.message` DIRECTLY. The `(e as { message?: string })` this replaces was a
+          // defensive cast for a binding that used to type as `string`; the binding is
+          // `NTError` now (raise inference reaches `parseStatement`'s callees), and the
+          // assertion became `'{message:?Ustring}' is not a valid assertion for 'NTError…'`
+          // — the FIRST BLOCKER of five of the twelve modules.
+          //
+          // The general lesson, recorded in docs/self-hosting.md before it bit here: a MORE
+          // PRECISE catch binding can invalidate an `as` assertion that only type-checked
+          // because the binding was imprecise. The cast was never load-bearing — every
+          // throw reaching this `catch` comes from `parseStatement`, which raises NTError.
+          if (!(e instanceof NTError)) throw e;   // tsc types a catch binding `unknown`
+          why = why.set(name, e.message.split("\n")[0]!);
         }
         // THE HARVEST, on every path (see hoistTypeDecls). A back-edge shape this round
         // minted is what the NEXT round's unions expand through, so losing it stalls the
@@ -909,7 +928,13 @@ class Parser {
    * (which the checker later substitutes per instantiation) instead of erasing to
    * `number`. Empty for ordinary code, so nothing else changes.
    */
-  private typeParamScopes: Set<string>[] = [];
+  // `string[][]`, not `Set<string>[]`. An ARRAY OF Set is NT1001 ("arrays of Set") and
+  // was the first blocker of five of the twelve modules through the link — the note on
+  // `inheritedTypeParams` below already knew this and went flat for the same reason; the
+  // STACKS could not, because a pop has to remove exactly one frame's names. A frame here
+  // holds one to three type parameters, so `.includes` answers the membership query at the
+  // same cost the Set did.
+  private typeParamScopes: string[][] = [];
   /**
    * Type parameters INHERITED from a parser that is lexically outside this one — the
    * frames open around a `${…}` substitution, which `parseSubstitution` hands to the
@@ -927,7 +952,7 @@ class Parser {
   private inheritedTypeParams = new Set<string>();
   private inTypeParamScope(id: string): boolean {
     if (this.inheritedTypeParams.has(id)) return true;
-    for (let i = this.typeParamScopes.length - 1; i >= 0; i--) if (this.typeParamScopes[i]!.has(id)) return true;
+    for (let i = this.typeParamScopes.length - 1; i >= 0; i--) if (this.typeParamScopes[i]!.includes(id)) return true;
     return false;
   }
 
@@ -1443,7 +1468,7 @@ class Parser {
   /** Is `n` a `(…) => Promise<T>` parameter of some enclosing body being parsed? */
   private inAsyncParamScope(n: string): boolean {
     if (this.inheritedAsyncParams.has(n)) return true;
-    for (const s of this.asyncParamScopes) if (s.has(n)) return true;
+    for (const s of this.asyncParamScopes) if (s.includes(n)) return true;
     return false;
   }
 
@@ -2785,7 +2810,8 @@ class Parser {
     const params: Param[] = [];
     //@@mutable
     const promiseIdx: number[] = [];
-    let promiseNames = new Set<string>();
+    //@@mutable
+    const promiseNames: string[] = [];
     if (!this.at(")")) {
       do {
         if (this.at(")")) break; // trailing comma in the param list
@@ -2840,7 +2866,7 @@ class Parser {
           // A `(…) => Promise<T>` parameter holds an async function, whoever passed it.
           // Calling it is exactly `one()` on an `async function one`, so it gets the same
           // floating-async guard — scoped to this body (see asyncParamScopes).
-          if (t.asyncFn) { promiseNames = promiseNames.add(pname); promiseIdx.push(params.length); }
+          if (t.asyncFn) { promiseNames.push(pname); promiseIdx.push(params.length); }
         }
         let def: Expr | undefined;
         if (this.at("=")) { this.eat("="); def = this.parseAssign(); }
@@ -2864,7 +2890,7 @@ class Parser {
     // in scope for the whole signature + body, so annotations mentioning them resolve to
     // `#T` markers and the checker can monomorphize per call site.
     const typeParams = this.at("<") ? this.parseTypeParamList() : [];
-    if (typeParams.length) this.typeParamScopes.push(new Set(typeParams));
+    if (typeParams.length) this.typeParamScopes.push(typeParams);
     try {
       const params = this.parseParamList();
       if (this.lastPromiseParams.length) this.promiseParamsByFn = this.promiseParamsByFn.set(name, this.lastPromiseParams);
@@ -3033,7 +3059,7 @@ class Parser {
       // which is what generic functions already do — the type argument comes from the
       // argument at each call site, not from the bound.
       const memberTypeParams = this.at("<") ? this.parseTypeParamList() : [];
-      if (memberTypeParams.length) this.typeParamScopes.push(new Set(memberTypeParams));
+      if (memberTypeParams.length) this.typeParamScopes.push(memberTypeParams);
       try {
       if (member === "constructor" && this.at("(") && !isStatic) {
         // TS forbids type parameters on a constructor (only `class C<T>` carries them),
@@ -3665,7 +3691,8 @@ class Parser {
     const params: Param[] = [];
     //@@mutable
     const arrowPromiseIdx: number[] = [];
-    let arrowPromiseNames = new Set<string>();
+    //@@mutable
+    const arrowPromiseNames: string[] = [];
     if (this.at("(")) {
       this.eat("(");
       if (!this.at(")")) {
@@ -3681,7 +3708,7 @@ class Parser {
             const t = this.parseTypeAsyncAware();
             annot = t.ty;
             // see parseParamList — same rule, arrow syntax
-            if (t.asyncFn) { arrowPromiseNames = arrowPromiseNames.add(name); arrowPromiseIdx.push(params.length); }
+            if (t.asyncFn) { arrowPromiseNames.push(name); arrowPromiseIdx.push(params.length); }
           }
           let def: Expr | undefined;
           if (this.at("=")) { this.eat("="); def = this.parseAssign(); }
@@ -3738,7 +3765,7 @@ class Parser {
       // annotations become `#T` markers — the checker then prefers the CONTEXTUAL type
       // where there is one, and otherwise erases the marker to `number` (pre-M3 behavior).
       const tps = this.parseTypeParamList();
-      if (tps.length) this.typeParamScopes.push(new Set(tps));
+      if (tps.length) this.typeParamScopes.push(tps);
       let arrow: Expr;
       try { arrow = this.parseArrow(); } finally { if (tps.length) this.typeParamScopes.pop(); }
       if (tps.length && arrow.kind === "ArrowFunction") {

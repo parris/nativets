@@ -648,7 +648,7 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // (`Set<Expr>` twice, `Map<Expr, …>` once) plus a `Map<string, Set<number>>`. All are
     // one-way STAMPS on the node now, or a plain `number[]`. The five land on NT1001
     // (`arrays of Set<string>`); the three behind checker.ts stay on NT1002.
-    ["NT1001", "NT1002"],
+    ["NT1002", "NT2001"],
     );
     // RE-MEASURED AT THE MERGE, and NEITHER SIDE WAS RIGHT — which is the whole argument
     // for re-measuring instead of picking one. This lane's list still carried NT1009
@@ -758,7 +758,7 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // The same five modules move together to NT1001 (`Set<string>[]`), which is asserted
     // as a membership rather than a bare absence so the next move names its holders.
     expect(byCode["NT1014"]?.slice().sort() ?? []).toEqual([]);
-    expect(byCode["NT1001"]?.slice().sort() ?? []).toEqual(["cli.ts", "coverage.ts", "driver.ts", "modules.ts", "parser.ts"]);
+    expect(byCode["NT2001"]?.slice().sort() ?? []).toEqual(["cli.ts", "coverage.ts", "driver.ts", "modules.ts", "parser.ts"]);
     // The five modules moved TOGETHER onto ast.ts's next one — `HOST_MODULES`, a `Record`
     // initialized with an object literal. Same set, one code further along; asserted here
     // so the group staying a group is visible rather than inferred.
@@ -911,7 +911,15 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // narrow — and the four blockers stacked behind it fell in the same sitting, so the
     // three land on NT1002 (`structuredClone` of the recursive `FuncDecl`) rather than on
     // another NT2001. The tier list above records the order they came off in.
-    expect((byCode["NT2001"] ?? []).slice().sort()).toEqual([]);
+    // ...and NT2001 REFILLS with a DIFFERENT five — parser.ts and the four that link it,
+    // never the three that emptied it. Exactly the substitution this file argues a bare
+    // presence check cannot see: the code is unchanged and every holder is new. They
+    // arrived after six blockers came off parser.ts in one sitting (Set<string>[] ->
+    // deferred.push -> a nullable Map value -> a stale `as` assertion), and what holds
+    // them now is `cannot infer type of arrow parameter`.
+    expect((byCode["NT2001"] ?? []).slice().sort()).toEqual(
+      ["cli.ts", "coverage.ts", "driver.ts", "modules.ts", "parser.ts"],
+    );
     expect((byCode["NT1002"] ?? []).slice().sort()).toEqual(
       ["checker.ts", "codegen.ts", "ownership.ts"],
     );
@@ -941,9 +949,7 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // ...and NT1001 IS BACK, held by the five modules behind src/parser.ts: `Set<string>[]`,
     // which is what they landed on when the identity-keyed `Expr` collections (NT1014)
     // became node stamps. A membership, so the next move names its holders.
-    expect((byCode["NT1001"] ?? []).slice().sort()).toEqual(
-      ["cli.ts", "coverage.ts", "driver.ts", "modules.ts", "parser.ts"],
-    );
+    expect((byCode["NT1001"] ?? []).slice().sort()).toEqual([]);
     // NT1606 — `o.f = v` on an AST node, held by the same nine modules through the link.
     // This is the DECISION the entry above named, arrived at: the typed walkers in
     // src/ast.ts write `e.ty = f(e.ty)` exactly where the reflective ones wrote
@@ -1370,7 +1376,11 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // ...and NT2001 EMPTIES AGAIN — the three `checker.ts`-linked modules moved to
     // NT1002. One expression started it (`asBlocker`'s `e: unknown`, where `instanceof`
     // does not narrow) and four more blockers came off behind it in the same sitting.
-    expect((byCode["NT2001"] ?? []).slice().sort()).toEqual([]);
+    // ...and NT2001 refills with parser.ts and the four modules that link it — a
+    // different five from the ones that emptied it (see the note above).
+    expect((byCode["NT2001"] ?? []).slice().sort()).toEqual(
+      ["cli.ts", "coverage.ts", "driver.ts", "modules.ts", "parser.ts"],
+    );
     expect(byCode["NT1003"] ?? []).toEqual([]);
     // NEW BUCKET, and it is one module deep: the captured-binding write behind the arrow.
     // ...and empty again: the cursor is one `//@@mutable` record now, so nothing writes a

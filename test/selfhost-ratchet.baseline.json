@@ -1,7 +1,7 @@
 {
   "recordedAt": {
     "date": "2026-08-11",
-    "rev": "8f608a4"
+    "rev": "08aed36"
   },
   "modules": {
     "ast.ts": {
@@ -40,8 +40,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1001",
-        "message": "[NT1001] arrays of Set<string> is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] cannot infer type of arrow parameter 'n'"
       }
     },
     "codegen.ts": {
@@ -80,8 +80,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1001",
-        "message": "[NT1001] arrays of Set<string> is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] cannot infer type of arrow parameter 'n'"
       }
     },
     "diagnostics.ts": {
@@ -107,8 +107,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1001",
-        "message": "[NT1001] arrays of Set<string> is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] cannot infer type of arrow parameter 'n'"
       }
     },
     "lexer.ts": {
@@ -133,8 +133,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1001",
-        "message": "[NT1001] arrays of Set<string> is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] cannot infer type of arrow parameter 'n'"
       }
     },
     "ownership.ts": {
@@ -152,7 +152,7 @@
       }
     },
     "parser.ts": {
-      "sha256": "ec5fad8c34db2e82",
+      "sha256": "efc37782b4ca3603",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -160,8 +160,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1001",
-        "message": "[NT1001] arrays of Set<string> is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] cannot infer type of arrow parameter 'n'"
       }
     }
   }
