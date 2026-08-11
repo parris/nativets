@@ -208,15 +208,51 @@ describe("fuzz findings — the lexer's escape table", () => {
 
 describe("fuzz findings — object literals", () => {
   /*
-   * In node `__proto__:` in an object LITERAL is the prototype setter, not a data property:
-   * the key never appears in `Object.keys`, `JSON.stringify` or `Object.values`. Here it is
-   * an ordinary key. Ranked low — node's behaviour is the surprising one and the shape is
-   * rare — but it is undocumented, and the prime directive is node.
+   * In node `__proto__:` in an object LITERAL is the prototype setter (B.3.1
+   * `__proto__` Property Names in Object Initializers), not a data property: the key never
+   * appears in `Object.keys`, `JSON.stringify` or `Object.values`. Here it was an ordinary
+   * key — a silent wrong answer at exit 0.
+   *
+   * It is NOT fixable. The setter's whole job is to install a PROTOTYPE, and nativets has no
+   * prototype chain: an object is a flat record with a fixed slot layout decided at compile
+   * time from its static type. The three shapes the setter takes all need the chain:
+   *   `{ __proto__: obj }`  — `o.b` must resolve on `obj`;
+   *   `{ __proto__: null }` — the object LOSES `Object.prototype`, so `"toString" in o` turns
+   *                           false, and our `in` answers that from a compile-time key list;
+   *   `{ __proto__: 1 }`    — a primitive is a no-op, so this one *is* expressible (drop the
+   *                           key) but it is an obfuscated `{}`; special-casing it would buy
+   *                           nothing and put a discarded, unowned value in the literal path.
+   * So the whole construct is refused (NT1038) rather than compiled three ways. This is the
+   * documented refusal in docs/divergences.md; the two tests below are its contract.
    */
-  it.failing("`__proto__` in an object literal is the prototype setter", async () => {
+  it("`__proto__` as a literal object-literal key is refused, not miscompiled", async () => {
+    // Every non-shorthand spelling of the key, including the ones we could have limped
+    // through: identifier, string, self-named value, object value, null value.
+    for (const stmt of [
+      'console.log(JSON.stringify({ "__proto__": 1 }));',
+      "console.log(JSON.stringify({ __proto__: 1 }));",
+      'console.log(Object.keys({ "__proto__": 1, other: 2 }).join("|"));',
+      "console.log(JSON.stringify({ __proto__: { b: 2 }, a: 1 }));",
+      "console.log(JSON.stringify({ __proto__: null, a: 1 }));",
+      "const __proto__ = 7;\nconsole.log(JSON.stringify({ __proto__: __proto__ }));",
+    ]) {
+      const r = await ourRun(`${stmt}\n`);
+      if (!isRefusal(r)) throw new Error(`compiled instead of refusing:\n${stmt}`);
+      expect({ stmt, nt1038: r.refused.includes("NT1038") }).toEqual({ stmt, nt1038: true });
+    }
+  });
+
+  /*
+   * The hint's advice, compiled against node. NT1038 says the SHORTHAND `{ __proto__ }` is an
+   * ordinary property — B.3.1 only rewrites `PropertyName : AssignmentExpression`, so
+   * `IdentifierReference` shorthand is untouched, and node really does keep the key. If that
+   * claim were wrong the diagnostic would be sending people at a second wrong answer.
+   */
+  it("the NT1038 hint is true: shorthand `{ __proto__ }` IS an ordinary property", async () => {
     await expectSameBytes([
-      'console.log(JSON.stringify({ "__proto__": 1 }));',                 // node {}, ours {"__proto__":1}
-      'console.log(Object.keys({ "__proto__": 1, other: 2 }).join("|"));', // node other, ours __proto__|other
+      "const __proto__ = 7;",
+      "console.log(JSON.stringify({ __proto__ }));",          // node {"__proto__":7}
+      'console.log(Object.keys({ __proto__, other: 2 }).join("|"));', // node __proto__|other
       "",
     ].join("\n"));
   });
