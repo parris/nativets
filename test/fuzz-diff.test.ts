@@ -298,7 +298,7 @@ describe("fuzz findings — object literals", () => {
    * strings and must stay where they were written. Any fix that sorts "anything numeric-ish"
    * would break the second half.
    */
-  it.failing("array-index keys enumerate first, in ascending numeric order", async () => {
+  it("array-index keys enumerate first, in ascending numeric order", async () => {
     await expectSameBytes([
       'const o = { b: 1, a: 2, "10": 3, "2": 4 };',
       "console.log(JSON.stringify(Object.keys(o)));",   // node ["2","10","b","a"]
