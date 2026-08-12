@@ -179,11 +179,22 @@ function rewriteTags(t: string, tags: Map<string, string>): string {
  * the (correctly renamed) IMPORTED shape was refused against the callee's stale one:
  * `expects …callee:@Expr…, got …callee:@_m0_Expr…`, two spellings of one type.
  */
-function rewriteTy<T extends Ty | undefined>(t: T, tags: Map<string, string>, refs: Map<string, string>): T {
-  if (t === undefined || (tags.size === 0 && refs.size === 0)) return t;
+/*
+ * NOT GENERIC ANY MORE. It was `<T extends Ty | undefined>` so that `undefined` in gave
+ * `undefined` out — but NO CALLER EVER PASSES ONE (both hand it a `Ty` off a map or a
+ * parameter), so the guard was unreachable and the generic bought nothing. It also cost:
+ * a type parameter's constraint is ERASED here, so at a call site where `T` is `Ty` the
+ * dead `t === undefined` is `Cannot compare string with undefined` — NT2001, no overlap,
+ * and correct. `tsc` agrees the narrower signature type-checks.
+ */
+function rewriteTy(t: Ty, tags: Map<string, string>, refs: Map<string, string>): Ty {
+  if (tags.size === 0 && refs.size === 0) return t;
   // A tag is an identifier immediately followed by `{`. Field names are followed by
   // `:`, so `{a:{b:number}}` never matches — only genuine class tags do.
-  return rewriteRefs(rewriteTags(t as string, tags), refs) as T;
+  // `as Ty`: the two rewriters answer a plain `string`, and `Ty` is a BRANDED string
+  // (src/ast.ts) — the assertion is where the brand is reapplied, exactly as the `as T`
+  // this replaces did. tsc catches its absence (TS2322), which is how this was found.
+  return rewriteRefs(rewriteTags(t, tags), refs) as Ty;
 }
 
 /**
@@ -227,7 +238,7 @@ class Renamer {
     if (i < 0) return this.n(name);
     return `${this.n(name.slice(0, i))}${name.slice(i)}`;
   }
-  private t<T extends Ty | undefined>(t: T): T { return rewriteTy(t, this.tags, this.refs); }
+  private t(t: Ty): Ty { return rewriteTy(t, this.tags, this.refs); }
 
   program(p: Program): Program {
     // `kind` is restated even though `...p` already carries it: a spread does not carry a
@@ -334,44 +345,75 @@ class Renamer {
  */
 //@@mutable
 /**
- * A string set a CLOSURE has to update — a record, because a write to a captured binding
- * is NT1031 while a field of an `@@mutable` record is not one (the binding never changes,
- * the object does). Used twice: `moduleOrder`'s DFS visited set, and `linkProgram`'s scan
- * for lowered static fields. The field is named `done` for the first; the second reads a
- * little oddly and sharing one declaration beats a second identical interface.
+ * State a CLOSURE has to update — a record, because a write to a captured binding is
+ * NT1031 and an in-place `.push` to a captured array is NT1607, while a FIELD STORE on an
+ * `@@mutable` record is neither (the binding never changes, the object does). Same device
+ * `src/lexer.ts`'s cursor uses to survive its scanners.
+ *
+ * `linkProgram`'s scan for lowered static fields uses the `done` field alone.
  */
 interface VisitSeen { done: Set<string> }
 
-function topLevelNames(p: Program): string[] {
+//@@mutable
+/** `moduleOrder`'s DFS: the visited set, the path stack (with the `import type` mark of
+ *  the edge that reached each entry), and the post-order result. */
+interface DfsState { done: Set<string>; stack: string[]; edges: boolean[]; order: string[] }
+
+/**
+ * The names one statement list binds — the recursive half of `topLevelNames`.
+ *
+ * A TOP-LEVEL FUNCTION, not an arrow inside its caller, and that is the whole reason it
+ * exists separately. As a `const walk = …` arrow it pushed into an accumulator, and the
+ * ownership pass refuses an in-place append inside an arrow that carries an environment
+ * (NT1607) — a self-recursive arrow carries one to reach itself, so even a list DECLARED
+ * in the arrow was refused. An ordinary function has no env, `acc` is an ordinary local,
+ * and `.push` under the array opt-in is the same append it always was.
+ *
+ * Each call OWNS its list and hands it back, so nothing is captured either way. The merges
+ * are written out at each recursion site rather than shared in a helper, because a nested
+ * arrow calling this would be a call to a function VALUE (NT1003). They are legal because
+ * these are STRINGS and a `string[]` element is a COPY (the NT1605 hint says so) — for a
+ * heap element the same loop would be moving out of a borrow.
+ */
+function bindingNamesIn(list: Stmt[]): string[] {
   //@@mutable
-  const out: string[] = [];
-  const walk = (list: Stmt[]): void => {
-    for (const s of list) {
-      switch (s.kind) {
-        // A class lowers to the FuncDecls `C.constructor` / `C.m` — the head is the class name.
-        case "FuncDecl": out.push(s.name.split(".")[0]!); break;
-        case "VarDecl": for (const d of s.decls) out.push(d.name); break;
-        case "IfStmt": walk(s.consequent); if (s.alternate) walk(s.alternate); break;
-        case "WhileStmt": case "DoWhileStmt": case "BlockStmt": walk(s.body); break;
-        case "ForStmt":
-          if (s.init && (s.init as Stmt).kind === "VarDecl") walk([s.init as Stmt]);
-          walk(s.body);
-          break;
-        case "ForOfStmt": case "ForInStmt": out.push(s.name); walk(s.body); break;
-        case "SwitchStmt": for (const c of s.cases) walk(c.body); break;
-        case "TryStmt":
-          if (s.param) out.push(s.param);
-          walk(s.block);
-          if (s.handler) walk(s.handler);
-          if (s.finalizer) walk(s.finalizer);
-          break;
-        case "MultiStmt": walk(s.stmts); break;
-        default: break;
-      }
+  const acc: string[] = [];
+  for (const s of list) {
+    switch (s.kind) {
+      // A class lowers to the FuncDecls `C.constructor` / `C.m` — the head is the class name.
+      case "FuncDecl": acc.push(s.name.split(".")[0]!); break;
+      case "VarDecl": for (const d of s.decls) acc.push(d.name); break;
+      case "IfStmt":
+        for (const n of bindingNamesIn(s.consequent)) acc.push(n);
+        if (s.alternate) { for (const n of bindingNamesIn(s.alternate)) acc.push(n); }
+        break;
+      case "WhileStmt": case "DoWhileStmt": case "BlockStmt":
+        for (const n of bindingNamesIn(s.body)) acc.push(n);
+        break;
+      case "ForStmt":
+        if (s.init && (s.init as Stmt).kind === "VarDecl") { for (const n of bindingNamesIn([s.init as Stmt])) acc.push(n); }
+        for (const n of bindingNamesIn(s.body)) acc.push(n);
+        break;
+      case "ForOfStmt": case "ForInStmt":
+        acc.push(s.name);
+        for (const n of bindingNamesIn(s.body)) acc.push(n);
+        break;
+      case "SwitchStmt": for (const c of s.cases) { for (const n of bindingNamesIn(c.body)) acc.push(n); } break;
+      case "TryStmt":
+        if (s.param) acc.push(s.param);
+        for (const n of bindingNamesIn(s.block)) acc.push(n);
+        if (s.handler) { for (const n of bindingNamesIn(s.handler)) acc.push(n); }
+        if (s.finalizer) { for (const n of bindingNamesIn(s.finalizer)) acc.push(n); }
+        break;
+      case "MultiStmt": for (const n of bindingNamesIn(s.stmts)) acc.push(n); break;
+      default: break;
     }
-  };
-  walk(p.body);
-  return [...new Set(out)];
+  }
+  return acc;
+}
+
+function topLevelNames(p: Program): string[] {
+  return [...new Set(bindingNamesIn(p.body))];
 }
 
 /** Which of a module's top-level names are CLASSES (their Ty carries the name as a tag). */
@@ -444,28 +486,23 @@ function moduleOrder(
   //@@mutable
   deps: Map<string, ImportDecl[]> = new Map(),
 ): string[] {
-  // ACCUMULATORS, so `.push`/`.pop` are the in-place operations the array opt-in
-  // legalizes (NT1606 otherwise). `order` is the post-order result and the other two are
-  // the DFS stack — a stack is the one shape the immutable spelling cannot express
-  // cheaply, since `xs = [...xs, v]` on the way down and `xs = xs.slice(0, -1)` on the way
-  // back up is two O(n) copies per edge.
-  //@@mutable
-  const order: string[] = [];
-  // A FIELD OF AN `@@mutable` RECORD, not a `let`. `visit` is a closure and closures
-  // capture by VALUE here, so `done = done.add(p)` inside it updates the closure's own
-  // copy and the outer binding never sees it — NT1031. Mutating a field of an `@@mutable`
-  // record is not a capture write: the binding never changes, the object does. Same shape
-  // `src/lexer.ts`'s `LexState` uses for the cursor, and for the same reason.
+  // ONE `@@mutable` RECORD, and the pushes are FIELD REBINDS rather than in-place appends.
   //
-  // The `.add` is still a REBIND of the field: a nativets `Set` is PERSISTENT and answers
-  // a new set, where bun's mutating `Set.add` would make the discarded spelling look right
-  // (docs/divergences.md §A).
-  const seen: VisitSeen = { done: new Set<string>() };
-  //@@mutable
-  const stack: string[] = [];
-  /** Aligned with `stack`: was the edge that reached `stack[i]` an `import type`? */
-  //@@mutable
-  const edges: boolean[] = [];
+  // `visit` is a self-recursive arrow, so it carries an environment, and the ownership pass
+  // refuses an in-place `.push` to anything that environment captures (NT1607) — the array
+  // opt-in answers NT1606 and not this. A field store on a captured `@@mutable` record IS
+  // legal (the binding never changes, the object does), which is how `src/lexer.ts`'s
+  // cursor survives the same closures.
+  //
+  // `xs = [...xs, v]` down and `xs.slice(0, -1)` back up is two O(n) copies per edge, which
+  // would be the wrong trade for the token stream and is the right one here: this walks a
+  // MODULE GRAPH — twelve nodes for this compiler, depth five.
+  // `done` is a field for a second, independent reason: a write to a CAPTURED BINDING is
+  // NT1031 (closures capture by value here, so `done = done.add(p)` inside `visit` would
+  // update the closure's own copy). A field store is not a capture write. The `.add` is
+  // still a rebind — a nativets `Set` is PERSISTENT and answers a new one, where bun's
+  // mutating `Set.add` would make the discarded spelling look right (docs/divergences.md §A).
+  const st: DfsState = { done: new Set<string>(), stack: [], edges: [], order: [] };
 
   const load = (path: string, importer: string | null, line: number): string => {
     const cached = sources.get(path);
@@ -483,8 +520,8 @@ function moduleOrder(
   };
 
   const visit = (path: string, importer: string | null, line: number, typeOnly: boolean): void => {
-    if (seen.done.has(path)) return;
-    const at = stack.indexOf(path);
+    if (st.done.has(path)) return;
+    const at = st.stack.indexOf(path);
     if (at >= 0) {
       // The chain, with each module's INCOMING edge marked when it is `import type`.
       //
@@ -498,8 +535,8 @@ function moduleOrder(
       //
       // So the diagnostic's job is to point at the edge that is one declaration from being
       // gone, instead of leaving the reader to conclude their program is cyclic. It is not.
-      const names = [...stack.slice(at), path];
-      const marks = [...edges.slice(at + 1), typeOnly]; // marks[i-1] is names[i]'s edge
+      const names = [...st.stack.slice(at), path];
+      const marks = [...st.edges.slice(at + 1), typeOnly]; // marks[i-1] is names[i]'s edge
       const cycle = names.map((p, i) => (i > 0 && marks[i - 1] ? `${show(p)}   (this edge is \`import type\`)` : show(p))).join("\n  → ");
       throw moduleError("NT1702", `import cycle:\n  → ${cycle}`,
         marks.some((m) => m)
@@ -507,8 +544,8 @@ function moduleOrder(
           : "break the cycle — move the shared declarations into a third module that both import");
     }
     const src = load(path, importer, line);
-    stack.push(path);
-    edges.push(typeOnly);
+    st.stack = [...st.stack, path];
+    st.edges = [...st.edges, typeOnly];
     // A discovery parse, just for the import list: the REAL parse happens post-order
     // below, seeded with the dependencies' type exports (unknowable until then).
     //
@@ -526,14 +563,14 @@ function moduleOrder(
     // DIFFERENT KIND of edge, and the user needs to be told which one they hit.
     for (const imp of imports) visit(resolveSpecifier(path, imp.source), path, imp.line,
       imp.specs.length > 0 && imp.specs.every((s) => s.typeOnly === true));
-    stack.pop();
-    edges.pop();
-    seen.done = seen.done.add(path);
-    order.push(path);
+    st.stack = st.stack.slice(0, st.stack.length - 1);
+    st.edges = st.edges.slice(0, st.edges.length - 1);
+    st.done = st.done.add(path);
+    st.order = [...st.order, path];
   };
 
   visit(entry, null, 0, false);
-  return order;
+  return st.order;
 }
 
 /* ------------------------------------------------------- text imports (SH5) */
@@ -773,10 +810,13 @@ export function linkProgram(entrySource: string, entryPath?: string, read: ReadM
     }
     } // end `exps !== undefined` — see the guard above
 
-    mods = mods.set(path, { path, source, program: renamed, finalExports, finalTypes, asyncExports });
-    // A BULK MOVE, not `push(...)`: a spread into a variadic/method call is NT1006, and
-    // `body` is a `let`, so reassigning says the same thing. Same order.
+    // THE STATEMENTS ARE TAKEN FIRST. A BULK MOVE, not `push(...)`: a spread into a
+    // variadic/method call is NT1006, and `body` is a `let`, so reassigning says the same
+    // thing with the same order. It has to happen BEFORE `mods.set` moves `renamed` into
+    // the map, or it reads a moved value (NT1601) — under bun both orders work, because
+    // the map and this frame are looking at one object there.
     body = [...body, ...renamed.body];
+    mods = mods.set(path, { path, source, program: renamed, finalExports, finalTypes, asyncExports });
   });
 
   // A STATIC field lowers to a module-level `const C.f`, and a read of one is rewritten to
@@ -806,16 +846,23 @@ export function linkProgram(entrySource: string, entryPath?: string, read: ReadM
         at);
     });
   }
-  const merged: Program = { kind: "Program", body };
-  if (mutableClasses.size) merged.mutableClasses = [...mutableClasses];
-  if (mutableRecords.size) merged.mutableRecords = [...mutableRecords];
-  if (recTypes.size) {
-    // A record array, not a `Map` spread's `[string, Ty][]` — see `Program.recTypes`.
-    let recs: RecTypeEntry[] = [];
-    for (const [n, shape] of recTypes) recs = [...recs, { name: n, ty: shape }];
-    merged.recTypes = recs;
-  }
-  if (hostImports.size) merged.hostImports = [...hostImports];
+  // BUILT IN ONE LITERAL. Objects are immutable (NT1606), so the four `merged.f = …`
+  // stores that followed the construction are not available — and they were only ever
+  // saying "omit this key when the set is empty", which `undefined` says exactly: every
+  // field is optional on `Program` and every reader asks `p.f?.length`. Same shape as
+  // `FuncDecl.typeParams` in the parser.
+  //
+  // `recTypes` is a RECORD ARRAY, not a `Map` spread's `[string, Ty][]` — see
+  // `Program.recTypes` — so it is built before the literal rather than inside it.
+  let recs: RecTypeEntry[] = [];
+  for (const [n, shape] of recTypes) recs = [...recs, { name: n, ty: shape }];
+  const merged: Program = {
+    kind: "Program", body,
+    mutableClasses: mutableClasses.size ? [...mutableClasses] : undefined,
+    mutableRecords: mutableRecords.size ? [...mutableRecords] : undefined,
+    recTypes: recTypes.size ? recs : undefined,
+    hostImports: hostImports.size ? [...hostImports] : undefined,
+  };
   return merged;
 }
 
