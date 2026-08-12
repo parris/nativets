@@ -1316,8 +1316,27 @@ class Parser {
     return i < 0 || i >= this.toks.length ? fallback : this.toks[i]!.line;
   }
 
-  private peek(o = 0): Token { return this.toks[this.pos + o]!; }
-  private next(): Token { return this.toks[this.pos++]!; }
+  /**
+   * The token `o` ahead — a COPY of it, not the element.
+   *
+   * `return this.toks[i]!` is `NT1605`: an array element is a borrow, the array owns it
+   * and frees it, so handing it out makes a second owner of one pointer. The refusal's
+   * hint prescribes reading THROUGH the index, and a `Token` is four scalars, so building
+   * one field by field is exactly that — every read is a copy and the array keeps its
+   * element. 130 call sites are unchanged, which is why the copy lives here rather than
+   * at each of them.
+   *
+   * IT IS ONLY SOUND BECAUSE NOTHING WRITES A TOKEN. `eatTypeClose` used to (it split a
+   * `>>` in place, and callers observed that through the alias `peek` handed back); that
+   * mutation is now parser-local state, and it was the only one in this file. A future
+   * write to a peeked token would be LOST rather than refused, so it is pinned by
+   * test/generics.test.ts's nested-close cases, which are precisely what would break.
+   */
+  private peek(o = 0): Token {
+    const i = this.pos + o;
+    return { type: this.toks[i]!.type, value: this.toks[i]!.value, line: this.toks[i]!.line, col: this.toks[i]!.col };
+  }
+  private next(): Token { const t = this.peek(); this.pos++; return t; }
   private at(v: string): boolean {
     const t = this.peek();
     return (t.type === "punct" || t.type === "ident") && t.value === v;
@@ -1383,9 +1402,16 @@ class Parser {
     this.checkFloatingAsyncCalls(body);
     this.checkAsyncEscapes();
     // Class members lower to top-level functions (`C.constructor`, `C.method`) so they
-    // register + hoist alongside ordinary functions for the checker/codegen. Appended one
-    // at a time — `push(...xs)` is a spread into a variadic call (NT1006) — same order.
-    for (const f of this.hoistedFns) body.push(f);
+    // register + hoist alongside ordinary functions for the checker/codegen.
+    //
+    // A SPREAD, not a push loop. `for (const f of this.hoistedFns) body.push(f)` moves each
+    // element out of the for-of binding, which is a BORROW of the array's element — NT1604,
+    // and pushing it elsewhere would make a second owner. Spreading both arrays into one
+    // literal is the bulk move the loop was spelling by hand: it consumes `hoistedFns`
+    // whole (nothing reads it after this), keeps the order, and owns one array at the end.
+    // `body.push(...this.hoistedFns)` is not the alternative — a spread into a variadic
+    // call is NT1006.
+    body = [...body, ...this.hoistedFns];
     // A static field is a module-level `const C.f` (see `parseClass`), so every `C.f` READ
     // becomes that identifier — here, once the whole file is parsed, because a function
     // body may legally read a static of a class declared further down.
@@ -1460,16 +1486,33 @@ class Parser {
    * (`spawn`/`send`/`receive`) for actual concurrency.
    */
   private checkFloatingAsyncCalls(body: Stmt[]): void {
-    // Never index -1: an empty body is ordinary, and there node answers `undefined`
-    // while nativets PANICS on the read. See test/tsc.test.ts.
-    const last = body.length > 0 ? body[body.length - 1]! : null;
-    const entrypoint = last !== null && last.kind === "ExprStmt" ? last.expr : null;
+    // THE ENTRYPOINT IS FOUND BY ITS INDEX IN `identCalls`, not by holding its node.
+    //
+    // This used to bind `const last = body[body.length - 1]!` and then `last.expr`, which
+    // is NT1605 twice over: an array element is a borrow, and so is a linear field read out
+    // of one. A COPY is not available here either — the test below is `c.node === …`, an
+    // IDENTITY comparison, and a copy is a different object. So the pass runs the other way
+    // round: walk `body` once, and at its last statement ask which `identCalls` entry (if
+    // any) that statement's expression IS. Everything that escapes the walk is an `int`.
+    //
+    // Never index -1: an empty body is ordinary, and there node answers `undefined` while
+    // nativets PANICS on the read (test/tsc.test.ts). The walk handles it by never running.
+    let entryIdx = -1;
+    let seen = 0;
+    for (const s of body) {
+      seen++;
+      if (seen !== body.length || s.kind !== "ExprStmt") continue;
+      let j = 0;
+      for (const c of this.identCalls) {
+        if (c.node === s.expr) entryIdx = j;
+        j++;
+      }
+    }
+    let idx = -1;
     for (const c of this.identCalls) {
+      idx++;
       if (!(c.scopedAsync || this.asyncFns.has(c.name))) continue;
-      // `entrypoint !== null` is written out because comparing an `Expr` with an
-      // `Expr | null` is NT2001 here. It changes nothing: `c.node` is an object, so
-      // `c.node === null` was already false on the arm the guard removes.
-      if ((c.node.kind === "CallExpr" && (c.node.awaited ?? false)) || (entrypoint !== null && c.node === entrypoint)) continue;
+      if ((c.node.kind === "CallExpr" && (c.node.awaited ?? false)) || idx === entryIdx) continue;
       throw nyi(
         NYI.ASYNC,
         `calling async function '${c.name}' without 'await' at ${c.line}:${c.col} (its value is a Promise under node; nativets runs it to completion immediately)`,
