@@ -132,20 +132,47 @@ describe("\\u escapes decode like node (differential)", () => {
  * where node says 1. A silent wrong answer of the same family, found while establishing
  * what backslash-zero means.
  *
- * Every one of them is a strict-mode SyntaxError, and a TypeScript module IS strict:
+ * THIS IS A DIVERGENCE, and the claim that stood here was wrong. It read: every one of
+ * them is a strict-mode SyntaxError, and a TypeScript module IS strict, so node refuses
+ * them too. The premise is true; the conclusion does not follow, because whether node
+ * treats a `.ts` file as strict depends on THE FILE'S SHAPE — and it was verified against
+ * node run as ESM while every fixture below is script-shaped. Measured:
  *
- *     $ node oct.mjs
- *     SyntaxError: Octal escape sequences are not allowed in strict mode.
+ *     $ node oct.ts          # no import/export: CommonJS, i.e. SLOPPY
+ *     aAb                    # exit 0 — node DECODES the octal escape
+ *     $ node oct.ts          # with `export {}` or "use strict": a module, i.e. strict
+ *     SyntaxError: Legacy octal escape is not permitted in strict mode
  *
- * so this is NT0001 — the band for syntax node also refuses — and not a divergence.
- * Verified against node run as ESM (i.e. strict) and against test262
- * language/literals/string/legacy-octal-escape-sequence-strict.js.
+ * `node <file>` is this project's oracle literally, and a single-file fixture is the
+ * sloppy shape — so nativets refuses a program node runs. The refusal is KEPT (refusing a
+ * deprecated Annex B form is the safe direction, and the value half of the original
+ * finding stands: we used to decode backslash-1 as the character "1"), but it is recorded
+ * as a refusal in docs/divergences.md rather than claimed as agreement.
+ *
+ * test262 language/literals/string/legacy-octal-escape-sequence-strict.js pins the STRICT
+ * behaviour, which is the shape these fixtures are not.
  *
  * Backslash-8 and backslash-9 are NOT octal: they are NonOctalDecimalEscapeSequence, and
  * test262 legacy-non-octal-escape-sequence-8-non-strict.js pins backslash-8 as "8", which
  * is already what we decode. They stay accepted.
  */
 describe("the octal escapes next door", () => {
+  // THE DIVERGENCE, RUN rather than asserted. Everything else here checks only the NT code,
+  // which is what let the wrong claim above survive: a code assertion cannot notice that
+  // node disagrees. This one asks node.
+  test("node ACCEPTS it in the script shape these fixtures use — the divergence, measured", () => {
+    const oracle = runWithNode('console.log("a' + BS + '101b");' + String.fromCharCode(10));
+    expect(oracle.exitCode).toBe(0);
+    expect(oracle.stdout).toBe("aAb" + String.fromCharCode(10));
+    expect(codeOf('console.log("a' + BS + '101b");' + String.fromCharCode(10))).toBe("NT0001");
+  });
+
+  test("node REFUSES it once the file is a module — the same source, one `export` added", () => {
+    const oracle = runWithNode("export {};" + String.fromCharCode(10) + 'console.log("a' + BS + '101b");' + String.fromCharCode(10));
+    expect(oracle.exitCode).not.toBe(0);
+    expect(oracle.stderr).toContain("octal");
+  });
+
   test("backslash-1 .. backslash-7 are refused, not decoded as the digit character", () => {
     expect(codeOf('const s = "a' + BS + '1b";\nconsole.log(s.charCodeAt(1));\n')).toBe("NT0001");
     expect(codeOf('const s = "' + BS + '7";\nconsole.log(s.length);\n')).toBe("NT0001");

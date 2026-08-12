@@ -216,9 +216,20 @@ export function decodeEscapeAt(raw: string, i: number, line: number, col: number
   // which truncated the string AND named the wrong character. `\1` alone was just as
   // wrong: it decoded to the character "1" (charCodeAt 49) where node says 1.
   //
-  // Every one of these is a SyntaxError in strict mode, and a TypeScript module is
-  // strict, so refusing them is not a divergence — it is the same answer node gives:
-  // "Octal escape sequences are not allowed in strict mode."
+  // A DIVERGENCE, and the claim that stood here was wrong. It said: these are a SyntaxError
+  // in strict mode, a TypeScript module is strict, so refusing them is the same answer node
+  // gives. The premise holds and the conclusion does not, because whether node treats a
+  // `.ts` file as strict depends on THE FILE'S SHAPE. A single file with no `import` or
+  // `export` loads as CommonJS — sloppy — and node DECODES the escape:
+  //
+  //     $ node oct.ts            # no import/export
+  //     aAb                      # exit 0
+  //
+  // `node <file>` is this project's oracle literally, and that is the shape a fixture has,
+  // so this refuses a program node runs. It is KEPT — refusing a deprecated Annex B form is
+  // the safe direction, and the finding behind it stands (we used to decode `\1` as the
+  // character "1", charCodeAt 49, where node says 1) — but it is recorded as a refusal in
+  // docs/divergences.md, not claimed as agreement. test/nul-string.test.ts RUNS both shapes.
   //
   // `\8` and `\9` are NOT octal (NonOctalDecimalEscapeSequence) and already decode as
   // node does, so they fall through to `escapeChar`. A BARE `\0` also falls through, and

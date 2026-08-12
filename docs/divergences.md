@@ -2096,10 +2096,14 @@ a module, which is strict. Since a divergence fixture is normally a single file 
 
 The inconsistency worth naming: the old text reasoned "the file is strict" for `\1` and cited a
 **non-strict** test262 case for `\8`, two lines apart. Both cannot be the oracle for one file.
-`test/nul-string.test.ts` carries the same claim in its header comment ("a TypeScript module IS
-strict … Verified against node run as ESM") while its own fixtures are script-shaped and it
-asserts only the `NT` code, never a node-differential run — that comment wants the same
-correction.
+**Both stale carriers are corrected now.** `test/nul-string.test.ts` carried the same claim in
+its header ("a TypeScript module IS strict … Verified against node run as ESM") while its own
+fixtures are script-shaped, and so did the comment at the refusal itself in `src/lexer.ts` —
+which is the one that actually misleads, because it is what a reader hits first. The test also
+asserted only the `NT` code and never ran node, which is exactly what let the wrong claim
+survive: a code assertion cannot notice that the oracle disagrees. Two cases now RUN node —
+the script shape (exit 0, prints `aAb`) and the module shape (`SyntaxError`) — so the
+divergence is measured on both sides rather than described.
 
 > Fixing this needed `\uHHHH` / `\u{H+}` to exist at all: `\u` was not an escape the lexer
 > knew, so it fell through to "an unknown escape is the character itself", and `"a\u0041b"`
