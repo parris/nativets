@@ -323,7 +323,15 @@ class Renamer {
       // expression (`o.f++`, `a[i]++`) that the walk above already rewrote, and `target`
       // is not a binding reference at all. Renaming it in that case would be wrong.
       case "UpdateExpr":
-        return w.targetExpr !== undefined ? w : { ...w, kind: "UpdateExpr", target: this.n(w.target) };
+        // `if`/`else`, not a `?:`. Both arms consume `w`, and a ternary arm in a consuming
+        // position MOVES (docs/divergences.md) — so one value counted as moved twice
+        // (NT1601) though only one arm can run. An explicit `else` is what the ownership
+        // pass can see the exclusivity through; an early `return` on its own is not.
+        if (w.targetExpr !== undefined) {
+          return w;
+        } else {
+          return { ...w, kind: "UpdateExpr", target: this.n(w.target) };
+        }
       case "AssignExpr": return { ...w, kind: "AssignExpr", target: this.n(w.target) };
       case "InstanceOfExpr": return { ...w, kind: "InstanceOfExpr", className: this.n(w.className) };
       case "NewExpr": return { ...w, kind: "NewExpr", callee: this.n(w.callee) };
