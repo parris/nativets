@@ -5424,3 +5424,67 @@ Roughly a dozen genuinely independent blockers (a `DataView`, a few narrowing ga
 string-method gap). `process.cwd()` was one of them and is now closed. Clearing the rest
 would still leave the three features above, which is the honest reason the 3-stage
 byte-identical bootstrap is not near.
+
+## `src/parser.ts` is CHECKER-CLEAN, and the ownership pass is a second wall behind it
+
+The checker refuses **0 of 119** functions in `parser.ts`. That is not the same as
+compiling it: `blocker-metric` counts checker refusals only, so a module at 0 has merely
+reached the pass that runs next. Nineteen ownership refusals have been cleared in
+`parser.ts` since it hit 0, and they sort into five kinds — worth naming, because four are
+mechanical and the fifth is not.
+
+**1. An element or a field read is a BORROW.** `const t = xs[i]!` makes a second owner
+(NT1605); so does binding a linear field out of one. The remedy is to read through the
+index (`xs[i]!.field`) or to build a copy field by field where the record is scalars.
+`peek()` is the one that mattered — 130 call sites, all untouched, because the copy lives
+in `peek` rather than at each of them.
+
+**2. A parameter is a borrow, so it cannot be returned.** Three functions took a node,
+stamped or vetted it, and handed it back. All three already mutated in place, so the
+return was redundant: they return `void` and ownership never leaves the caller's frame.
+
+**3. Take-and-replace is invisible.** `const p = this.f; this.f = [];` reads and stores,
+and the pass relates neither — `mem::take` has no spelling here. Copy out instead.
+
+**4. Path-insensitivity, and the remedy is NOT uniform.** A ternary whose arms both
+consume one value counts two moves; so does an `if` whose first branch ends in `return` or
+`continue`. **`if (c) return A; return B;` does not work — measured.** Only an explicit
+`else` makes the exclusivity visible. But not every one of these is the analysis being
+conservative: `typeParams.length` read in a `finally` that runs *after* the node took the
+array is a REAL use-after-move, and so was a `break` that left `expr` moved-from for the
+`return expr` below it. Telling the two apart is the whole job — copying everything hides
+the ones that are true.
+
+### The wall: `identCalls` holds the same node the AST holds
+
+`parseArrow`'s `mk` stamped through a parameter and had to stop existing (the three call
+sites became one literal built in the frame that owns it). The floating-async guard cannot
+be fixed that way, and it is where `parser.ts` stands:
+
+```ts
+private identCalls: { node: Expr; name: string; … }[] = [];
+…
+expr = call;                                  // the AST owns it
+this.identCalls.push({ node: call, … });      // and so does this list
+```
+
+Two owners of one pointer, **on purpose**. `checkFloatingAsyncCalls` reads `c.node.awaited`
+— a stamp applied LATER, at the `await` site — and the merge from a template-substitution
+sub-parser carries no `awaitedCalls` list precisely because "the stamp lives on the shared
+node and travels for free". The sharing is the mechanism.
+
+**A loc key would replace it.** A `CallExpr`'s `loc` is its `(` token's line and column,
+unique within a file, and `rebaseTokens` maps a substitution's tokens into the outer
+template's span where no other token lives — so no collision. `awaited` would push a loc
+into a list instead of stamping a shared node, and the guard would compare two ints.
+
+It is **not** done here, and the reason is worth writing down rather than leaving implied:
+this guard has a silent-wrong-answer in its history (`` `${one()}` `` printed `1` where
+node prints `[object Promise]`, both exit 0), and a redesign of it earns its own red test
+first. `test/floating-async.test.ts` now pins the acceptance rule in both directions —
+dropping the exception reds f1/f5, widening it to any `ExprStmt` reds f2/f6 — which is the
+harness that redesign needs and did not have when this was written.
+
+Behind the alias, a probe (pushes stubbed, `expr = call` moved to the end of the branch)
+reports `args` moved into the call literal and then read by the `forEach` below it — an
+ordinary reorder. So the alias is a real wall, but it is not obviously a deep one.

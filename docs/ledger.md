@@ -947,3 +947,36 @@ back at their expense.
 
 Found while chasing something else: `peek()` returning an array element is `NT1605`, and the
 in-place split was what stopped `peek` from returning a copy. Eight cases, five red before.
+
+## `src/parser.ts` through the ownership pass — nineteen refusals, five kinds
+
+`parser.ts` reached **0 of 119** checker refusals and then met the pass that runs next.
+The refusals cleared since sort into five kinds, and the split matters more than the count
+because four are the analysis being conservative and the fifth is the analysis being right.
+
+| kind | shape | remedy |
+|---|---|---|
+| element / linear field read | `const t = xs[i]!` (NT1605) | read through the index, or copy field by field |
+| parameter returned | `f(d: T): T { …; return d }` (NT1604) | return `void`; ownership stays with the caller |
+| take-and-replace | `const p = this.f; this.f = []` | `const p = [...this.f]` — `mem::take` has no spelling here |
+| path-insensitivity | both `?:` arms consume; `if`-branch ends in `return`/`continue` | an explicit `else` |
+| **a real use-after-move** | `.length` in a `finally` that runs after the handoff; a `break` that skipped the rebind | fix the code |
+
+**`if (c) return A; return B;` DOES NOT SATISFY THE PASS.** Measured, twice. Only an
+explicit `else` makes the two paths exclusive to it. Worth knowing before reaching for the
+early-return spelling, which is the more natural thing to write.
+
+The two in the last row were pointing at something true. `typeParams.length` was read in a
+`finally` that runs *after* the returned node took the array; and `parsePostfix`'s
+`else break` left `expr` moved-from for the `return expr` below it and for the next turn
+of the loop. Both work under bun only because everything lives in one frame there.
+
+**Two diagnostics gained a location on the way.** The object-literal shorthand `{ params }`
+synthesized its `Identifier` with no `loc`, so every ownership refusal reported through one
+printed its code and message and nothing else — and building a node out of locals is *the*
+way this parser writes an AST, so that is exactly where moves get reported. Two refusals
+cost real time to locate by hand before it was fixed.
+
+**Where it stops** is an alias that is deliberate: `identCalls` holds the same `CallExpr`
+the AST holds, so an `awaited` stamp applied later travels for free. See
+`docs/self-hosting.md` for the loc key that would replace it and why it is not done yet.
