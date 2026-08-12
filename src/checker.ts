@@ -9,6 +9,9 @@
 
 import type { Program, Stmt, Expr, Ty, FuncDecl, VarDecl, ForOfStmt, MemberExpr, FieldAssign, Declarator, Param } from "./ast.ts";
 import { mentionsThis, ctorFieldsStored } from "./ast.ts";
+// The TYPED child walkers — exhaustive by construction (no `default:` arm), which is what
+// lets the definite-assignment walk stop being reflective. See `daWalkStmt`.
+import { walkStmtChildren, walkExprChildren } from "./ast.ts";
 import { isArrayTy, elemTy, isObjectTy, objectType, objectFields, fieldType, isFuncTy, funcParams, funcRet, makeFuncTy, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, makeMapTy, makeSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isTextEncoderTy, isTextDecoderTy, isResponseTy, isHeadersTy } from "./ast.ts";
 import { hasTypeParam, substTypeParams, eraseTypeParams, unifyTypeParams, mapTypesDeep, mapTypesDeepStmt, mutableTags, exprText, exprLoc, freshArray, stringLiteralValue, keyIsEncodable, exprTy } from "./ast.ts";
 import { makeArrayTy } from "./ast.ts";
@@ -2672,7 +2675,17 @@ class Checker {
     // empty body is fine — it falls into the next case, which is still inside the switch.
     const total = last.cases.every((c, i) => (c.body.length === 0 && i < last.cases.length - 1) || leavesFunction(c.body));
     if (!total) return;
-    const covered = new Set(last.cases.map((c) => (c.test && c.test.kind === "StringLiteral" ? c.test.value : "")));
+    // BOUND TO A CONST, then narrowed — `c.test && c.test.kind === "StringLiteral" ? …`
+    // does not carry its narrowing into the ternary arm here, so `c.test.value` came out
+    // `unknown` and the set built from it was `Set of unknown` (NT1014). A field of another
+    // object is not a stable access path for narrowing; a local is.
+    //@@mutable
+    const tags: string[] = [];
+    for (const c of last.cases) {
+      const t = c.test;
+      tags.push(t !== null && t.kind === "StringLiteral" ? t.value : "");
+    }
+    const covered = new Set(tags);
     const missing = unionTagValues(u).filter((v) => !covered.has(v));
     if (missing.length === 0) return;
     throw typeError(
@@ -4836,7 +4849,7 @@ class Checker {
             else throw nyi(NYI.COLLECTION, `new Set(${at}) (only an array or another Set is supported — build others with .add)`);
             if (declared && el !== declared) throw typeError(`new Set<${declared}> from ${at} (element type must match)`);
           }
-          if (el !== "string" && el !== "number") throw nyi(NYI.COLLECTION, `Set of ${el}`);
+          if (el !== "string" && el !== "number") throw nyi(NYI.COLLECTION, `Set of ${el}`, undefined, e.loc);
           return makeSetTy(el);
         }
         // Bytes (stdlib batch 2): `new Uint8Array(n)` (zero-filled length n) or
@@ -8995,45 +9008,69 @@ function daCheckCtorExit(
  * nested body is already refused at the point the function VALUE appears, because
  * `daUse` is shape-blind and descends into it.
  */
+/**
+ * Analyse ONE function body: the locals this pass has always proved, and — when the body
+ * is a constructor's — its fields. Sharing the walk is what keeps the two diagnostics in
+ * source order and stops the constructor question from acquiring a second, weaker
+ * control-flow model of its own.
+ *
+ * `fn` is the `FuncDecl` when there is one, and `null` for an arrow (which has no fields
+ * to prove).
+ */
+function daAnalyzeBody(nested: Stmt[], fn: FuncDecl | null): void {
+  const fields = fn === null ? new Map<string, Ty | "unknown">() : daCtorFieldTys(fn);
+  // `tracked = tracked.set(…)`, not `tracked.set(…)` — the rule `daCtorFieldTys` above
+  // states and follows: `Map` is PERSISTENT in the subset `src/` must stay inside, so the
+  // bare call returns a new map and leaves the receiver untouched. Under bun the two spell
+  // the same thing, which is exactly why the census lint (test/discarded-mutator.test.ts)
+  // is the only instrument that catches it — a self-hosted build would have walked an
+  // EMPTY tracked set and refused nothing.
+  let tracked = new Map<string, Ty | "unknown">();
+  for (const f of fields.keys()) tracked = tracked.set(daField(f), fields.get(f) ?? "unknown");
+  const flow = new Set<string>();
+  //@@mutable
+  const myRets: string[][] = [];
+  const exit = daBlock(nested, tracked, false, flow, [], [], myRets);
+  if (fields.size > 0 && fn !== null) daCheckCtorExit(fn, fields, flow, exit, myRets);
+}
+
+/*
+ * FIND EVERY NESTED BODY — typed, where this was a reflective `walk(node: unknown)` with
+ * an `Object.values` recursion and a `Set<unknown>` cycle guard.
+ *
+ * The guard is gone with the reflection: an AST is a TREE, and a typed walk cannot wander
+ * into a non-node field the way a value-walk can. `walkStmtChildren`/`walkExprChildren`
+ * drive the recursion, so a node kind this does not handle is a tsc error rather than a
+ * silent skip — which matters here more than usual, because the old comment says it: a
+ * shape this walk does not recognize runs no analysis and refuses nothing, so an
+ * unrecognized body is a SILENT acceptance, never a loud failure.
+ *
+ * Nothing is accumulated, so the callbacks capture nothing and the rebuilt nodes those
+ * walkers return are simply dropped. That is one extra tree's worth of allocation per
+ * compile, once.
+ */
+function daWalkStmt(s: Stmt): void {
+  if (s.kind === "FuncDecl") daAnalyzeBody(s.body, s);
+  walkStmtChildren(s, (x: Expr): Expr => { daWalkExpr(x); return x; }, (y: Stmt): Stmt => { daWalkStmt(y); return y; }, (t: Ty): Ty => t);
+}
+
+function daWalkExpr(e: Expr): void {
+  // An arrow's `body` is the EXPRESSION form and its `stmts` the block form — two fields
+  // rather than a union, for the reason ast.ts's `ArrowFunction` comment gives. Only the
+  // block form is a body to analyse; the expression form has no statements to prove.
+  if (e.kind === "ArrowFunction") {
+    // Bound to a LOCAL first: the guard has to narrow the thing that is PASSED, and a field
+    // of another object is not a stable access path here — `daAnalyzeBody(e.stmts, …)`
+    // under `e.stmts !== undefined` is still `?UStmt[]` at the argument.
+    const block = e.stmts;
+    if (block !== undefined) daAnalyzeBody(block, null);
+  }
+  walkExprChildren(e, (x: Expr): Expr => { daWalkExpr(x); return x; }, (y: Stmt): Stmt => { daWalkStmt(y); return y; }, (t: Ty): Ty => t);
+}
+
 function checkDefiniteAssignment(body: Stmt[]): void {
-  daBlock(body, new Map<string, Ty | "unknown">(), false, new Set<string>(), [], [], []);
-  const seen = new Set<unknown>();
-  const walk = (node: unknown): void => {
-    if (Array.isArray(node)) { for (const x of node) walk(x); return; }
-    if (node === null || typeof node !== "object" || seen.has(node)) return;
-    seen.add(node);
-    // A nested function body, by the field that HOLDS its statements: `FuncDecl.body`,
-    // and `ArrowFunction.stmts` (an arrow's `body` is the EXPRESSION form — see the
-    // ArrowFunction comment in ast.ts for why those are two fields and not a union).
-    // Naming both explicitly rather than probing `body` for an array is what keeps this
-    // walk honest: a shape it does not recognize runs no analysis and refuses nothing,
-    // so an unrecognized body is a SILENT acceptance, never a loud failure.
-    const n = node as { kind?: string; body?: unknown; stmts?: unknown };
-    const nested = n.kind === "FuncDecl" ? n.body : n.kind === "ArrowFunction" ? n.stmts : undefined;
-    if (Array.isArray(nested)) {
-      // ONE walk, two tracked kinds: the locals this pass has always proved, and — when
-      // this body is a constructor — its fields. Sharing the walk is what keeps the two
-      // diagnostics in source order and stops the constructor question from acquiring a
-      // second, weaker control-flow model of its own.
-      const fn = node as FuncDecl;
-      const fields = n.kind === "FuncDecl" ? daCtorFieldTys(fn) : new Map<string, Ty | "unknown">();
-      // `tracked = tracked.set(…)`, not `tracked.set(…)` — the rule `daCtorFieldTys`
-      // above states and follows: `Map` is PERSISTENT in the subset `src/` must stay
-      // inside, so the bare call returns a new map and leaves the receiver untouched.
-      // Under bun the two spell the same thing, which is exactly why the census lint
-      // (test/discarded-mutator.test.ts) is the only instrument that catches it — a
-      // self-hosted build would have walked an EMPTY tracked set and refused nothing.
-      let tracked = new Map<string, Ty | "unknown">();
-      for (const f of fields.keys()) tracked = tracked.set(daField(f), fields.get(f) ?? "unknown");
-      const flow = new Set<string>();
-      //@@mutable
-      const myRets: string[][] = [];
-      const exit = daBlock(nested as Stmt[], tracked, false, flow, [], [], myRets);
-      if (fields.size > 0) daCheckCtorExit(fn, fields, flow, exit, myRets);
-    }
-    for (const v of Object.values(node)) walk(v);
-  };
-  walk(body);
+  daAnalyzeBody(body, null);
+  for (const s of body) daWalkStmt(s);
 }
 
 /** A union rendered the way it was written (`A | B`), for diagnostics. */

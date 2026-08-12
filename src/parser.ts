@@ -4454,6 +4454,7 @@ class Parser {
       );
     }
     if (this.at("new")) {
+      const newTok = this.peek();
       this.eat("new");
       const callee = this.expectIdent();
       const typeArgs = this.at("<") ? this.parseTypeArgs() : undefined; // new Map<K,V>() / new Set<T>()
@@ -4464,7 +4465,7 @@ class Parser {
       this.eat(")");
       // Route the constructed value through postfix so `new Map().set(...)`,
       // `new Set().add(x).has(x)`, `err.message`, etc. chain like any primary.
-      return this.parsePostfix({ kind: "NewExpr", callee, args, typeArgs });
+      return this.parsePostfix({ kind: "NewExpr", callee, args, typeArgs, loc: { line: newTok.line, col: newTok.col, file: this.file } });
     }
     if (this.at("++") || this.at("--")) {
       const op = this.next().value as "++" | "--";

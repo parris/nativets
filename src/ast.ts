@@ -1367,7 +1367,11 @@ export interface CallExpr {
    *  codegen the only reader, exactly like `nullOnMove` and `awaited`. */
   inPlaceColl?: boolean;
 }
-export interface NewExpr { kind: "NewExpr"; callee: string; args: Expr[]; typeArgs?: Ty[]; ty?: Ty; }
+/** `loc` for the reason every other node carries one: a refusal about a `new X(…)` — an
+ *  unsupported Map/Set element type, most of them — had NO span at all, so in a
+ *  multi-module program it named neither a file nor a line. Third node this session to
+ *  need it (after `ThrowStmt` and the object-literal shorthand's `Identifier`). */
+export interface NewExpr { kind: "NewExpr"; callee: string; args: Expr[]; typeArgs?: Ty[]; ty?: Ty; loc?: Loc; }
 export interface AsExpr { kind: "AsExpr"; expr: Expr; ty: Ty; } // `expr as Type` — identity retype
 /**
  * `expr satisfies Type` — CHECKED but never ADOPTED. `as` replaces the expression's

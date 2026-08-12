@@ -350,8 +350,7 @@ describe("discarded persistent mutators in src/", () => {
     "checker.ts alphaRenameShadows: cur.set(…)",
     "checker.ts alphaRenameShadows: used.add(…)",
     "checker.ts alphaRenameShadows: used.add(…)",
-    "checker.ts checkDefiniteAssignment: seen.add(…)",
-    "checker.ts collectAssigned: <ConditionalExpr>.add(…)",
+      "checker.ts collectAssigned: <ConditionalExpr>.add(…)",
     "checker.ts collectAssigned: <ConditionalExpr>.add(…)",
                                   // (The two `moduleOrder` Map parameters that used to head this list are GONE: the
   // per-parameter `//@@mutable` opt-in accepts a Map/Set now, so the shape that had no
