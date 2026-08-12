@@ -5532,3 +5532,33 @@ The remedies the diagnostic offers are a `try`/`catch` at both call sites or a r
 by the lexer and the template builder, and changing how it reports failure changes the
 `LexError` path both rely on — which earns its own red test first, the same standard the
 floating-async redesign was held to.
+
+#### The NT1004 wall, measured — 11 throws, 3 functions, and one workaround that does NOT work
+
+Small enough to name exactly:
+
+| function | throws | called from |
+|---|---|---|
+| `decodeEscapeAt` | 6 | `lexer.ts:489` (inside `lex`), `parser.ts:4793` (`buildTemplate`) |
+| `scanTemplateBody` | 4 | `lexer.ts:526` (inside `lex`) |
+| `scanQuoted` | 1 | `lexer.ts:397` (inside `lex`) |
+
+**The obvious workaround is refused, and that was measured rather than assumed.** Wrapping
+each call site in `try { … } catch (e) { throw e; }` does not help: a rethrow FROM A CATCH
+is itself a throw not inside a `try` in the same function.
+
+```ts
+function outer(n: number): number {
+  try { return inner(n); } catch (e) { throw e; }   // NT1004 at the rethrow
+}
+```
+
+**The shape that would work** is to funnel: the three helpers stop throwing and record the
+failure in the cursor record they already share, and `lex` raises once. `lex`'s own throw is
+legal — `parser.ts`'s `tokenize` already calls it inside a `try`. `decodeEscapeAt` needs the
+same treatment for its second caller, `buildTemplate`, which is in `parser.ts`.
+
+Not attempted here. `lexer.ts` is at **rung 3** — it compiles, links and matches node —
+and rewriting how the whole module reports failure is exactly the kind of change that
+should not be started half-done at the end of a stretch. It is the next lane, and it is a
+bounded one: 11 sites, 3 functions, one funnel.
