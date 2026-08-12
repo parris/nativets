@@ -684,7 +684,11 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     //
     // Three codes is what a frontier looks like when a shared term is genuinely removed
     // rather than moved: the conjunction this file keeps recording has one fewer factor.
-    ["NT1002", "NT1604", "NT1606"],
+    // ...and parser.ts walks the OWNERSHIP pass: NT1604 (a borrowed parameter handed back)
+    // -> NT1605 (an array element bound to a name) -> NT1601. Each is a real rule, and
+    // NT1605 shipped with NO HINT — the only NT16xx without one — which is fixed here and
+    // whose advice was compiled against node before being followed.
+    ["NT1002", "NT1601", "NT1606"],
     );
     // RE-MEASURED AT THE MERGE, and NEITHER SIDE WAS RIGHT — which is the whole argument
     // for re-measuring instead of picking one. This lane's list still carried NT1009
@@ -1322,7 +1326,10 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // disguise. parser.ts is CHECKER-CLEAN (0 of 118 functions refused), so what stops
     // it is an OWNERSHIP blocker: a different pass, reached only because everything
     // before it now passes.
-    expect((byCode["NT1604"] ?? []).slice().sort()).toEqual(["parser.ts"]);
+    expect((byCode["NT1604"] ?? []).slice().sort()).toEqual([]);
+    // parser.ts is three refusals into the OWNERSHIP pass now — reached only because the
+    // checker passes it entirely (0 of 118 functions refused).
+    expect((byCode["NT1601"] ?? []).slice().sort()).toEqual(["parser.ts"]);
     // RATCHET MOVE (short-circuit narrowing): the NT2001 bucket is now EMPTY. It held
     // one module, `diagnostics.ts`, on `!diag.spans || diag.spans.length === 0` — a
     // FALSE POSITIVE (correct TypeScript, correct at runtime) because a guard did not

@@ -473,7 +473,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // start of the 2026-08-11 session. Its blocker is an OWNERSHIP one now (NT1604), which
   // is a different pass, and the four modules that used to inherit its refusal blame
   // src/modules.ts instead.
-  "parser.ts": { rung: 0, code: "NT1604", blame: "self" },
+  "parser.ts": { rung: 0, code: "NT1601", blame: "self" },
   // THE CRUX MOVED, then moved again. `Record<string, number | "var">` compiles, so
   // checker.ts left NT1009; it then stopped on `delete o.k` (NT1606), which the delete
   // lane established must STAY refused — node distinguishes an absent key from a

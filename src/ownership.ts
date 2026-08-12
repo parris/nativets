@@ -1618,7 +1618,14 @@ class Analyzer {
         // A Copy element (number[]/string[]) is a plain read; a field/method access through the
         // index is a borrow (consume=false) — both stay legal.
         if (consume && e.ty !== undefined && isLinearTy(e.ty)) {
-          this.report({ code: OWN_CODES.MOVE_OUT_OF_ARRAY, message: `cannot move out of array element (its element type is linear)`, line: lineOf(e.object) });
+          // A HINT, which this refusal shipped without — and it is the one NT16xx rule that
+          // had none, so a reader got a correct diagnosis and no way forward.
+          this.report({
+            code: OWN_CODES.MOVE_OUT_OF_ARRAY,
+            message: `cannot move out of array element (its element type is linear)`,
+            line: lineOf(e.object),
+            hint: "an array ELEMENT is a borrow — the array owns it and frees it, so binding it to a name would make a second owner of one pointer. READ THROUGH it instead (`xs[i].field`, `xs[i].method()`), which stays legal; iterate with `for (const x of xs)` when you want each element in turn; or build a new value from it. A `number[]`/`string[]`/`boolean[]` element is a COPY and is unaffected — this only applies where the element is itself a heap value",
+          });
         }
         this.expr(e.object, state, false); this.expr(e.index, state, false); return;
       case "BinaryExpr": this.expr(e.left, state, false); this.expr(e.right, state, false); return;

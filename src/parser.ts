@@ -614,23 +614,30 @@ class Parser {
     // parsing so a name's declaration is known no matter where it sits in the file.
     let depth = 0; // brace depth, so `typeDeclStarts` can keep to top-level declarations
     for (let i = 0; i + 1 < toks.length; i++) {
-      const t = toks[i]!;
-      const n = toks[i + 1]!;
-      if (t.type === "punct" && t.value === "{") depth++;
-      else if (t.type === "punct" && t.value === "}") depth--;
-      else if (t.type === "ident" && t.value === "class" && n.type === "ident") this.declaredClassNames = this.declaredClassNames.add(n.value);
-      else if ((t.value === "interface" || t.value === "type") && t.type === "ident" && n.type === "ident") {
+      // FIELDS, not the elements. `const t = toks[i]!` binds an array ELEMENT, which is a
+      // borrow — the array owns it and frees it — so naming it would make a second owner
+      // (NT1605). Reading through the index is what the refusal's hint prescribes, and the
+      // fields here are all scalars, so each read is a copy.
+      const tType = toks[i]!.type;
+      const tValue = toks[i]!.value;
+      const tLine = toks[i]!.line;
+      const nType = toks[i + 1]!.type;
+      const nValue = toks[i + 1]!.value;
+      if (tType === "punct" && tValue === "{") depth++;
+      else if (tType === "punct" && tValue === "}") depth--;
+      else if (tType === "ident" && tValue === "class" && nType === "ident") this.declaredClassNames = this.declaredClassNames.add(nValue);
+      else if ((tValue === "interface" || tValue === "type") && tType === "ident" && nType === "ident") {
         // `type X =` only — `type` is not a reserved word, so `const type = 1` must not
         // register `= 1` as a declaration. `interface` is always a declaration.
-        if (t.value === "interface" || toks[i + 2]?.value === "=" || toks[i + 2]?.value === "<") {
-          if (!this.declaredTypeLines.has(n.value)) this.declaredTypeLines = this.declaredTypeLines.set(n.value, t.line);
-          if (depth === 0 && !this.typeDeclStarts.has(n.value)) {
+        if (tValue === "interface" || toks[i + 2]?.value === "=" || toks[i + 2]?.value === "<") {
+          if (!this.declaredTypeLines.has(nValue)) this.declaredTypeLines = this.declaredTypeLines.set(nValue, tLine);
+          if (depth === 0 && !this.typeDeclStarts.has(nValue)) {
             // Walk back over the declaration's prefix so a re-parse from here sees the
             // whole thing: `export`, then any `@@attr` / `@wrapper` pair before it.
             let s = i;
             if (s > 0 && toks[s - 1]!.value === "export") s--;
             while (s >= 2 && toks[s - 1]!.type === "ident" && (toks[s - 2]!.value === "@@" || toks[s - 2]!.value === "@")) s -= 2;
-            this.typeDeclStarts = this.typeDeclStarts.set(n.value, s);
+            this.typeDeclStarts = this.typeDeclStarts.set(nValue, s);
           }
         }
       }
@@ -662,8 +669,8 @@ class Parser {
    */
   private scanExternalNames(toks: Token[]): void {
     for (let i = 0; i < toks.length; i++) {
-      const t = toks[i]!;
-      if (t.type !== "ident" || t.value !== "import") continue;
+      // Fields, not the element — see the scan above (NT1605: an element is a borrow).
+      if (toks[i]!.type !== "ident" || toks[i]!.value !== "import") continue;
       // `import("m").T` — an inline import TYPE, not a declaration. It binds nothing.
       if (toks[i + 1]?.value === "(") continue;
       // `import.meta.url` — the META PROPERTY, not a declaration either, and the second
@@ -674,12 +681,13 @@ class Parser {
       // 67 of the 496 `.ts` files in the tree could not have reported it.
       if (toks[i + 1]?.value === ".") continue;
       for (let j = i + 1; j < toks.length; j++) {
-        const u = toks[j]!;
-        if (u.type === "str") break;                          // reached the module specifier
-        if (u.type === "ident" && u.value === "from") break;
-        if (u.type !== "ident") continue;                     // `{` `}` `,` `*` punctuation
-        if (u.value === "type" || u.value === "as") continue; // modifier keywords, not bindings
-        this.externalNames = this.externalNames.add(u.value);
+        const uType = toks[j]!.type;
+        const uValue = toks[j]!.value;
+        if (uType === "str") break;                          // reached the module specifier
+        if (uType === "ident" && uValue === "from") break;
+        if (uType !== "ident") continue;                     // `{` `}` `,` `*` punctuation
+        if (uValue === "type" || uValue === "as") continue;  // modifier keywords, not bindings
+        this.externalNames = this.externalNames.add(uValue);
       }
     }
   }
@@ -4761,7 +4769,12 @@ function tokenize(source: string): Token[] {
     if (e instanceof LexError) throw parseError(e.message);
     throw e;
   }
-  return checkNoNul(tokens);
+  // The check does not HAND THE ARRAY BACK. A parameter is a BORROW — the caller owns it
+  // and drops it — so `return tokens` from inside made the receiver a second owner and was
+  // NT1604. It is a pure predicate over the tokens (it only throws), so `void` says what it
+  // does and this scope keeps the one ownership it always had.
+  checkNoNul(tokens);
+  return tokens;
 }
 
 /**
@@ -4776,13 +4789,12 @@ function tokenize(source: string): Token[] {
  * `buildTemplate` splits it), so a template's own escapes are checked there. A raw NUL
  * BYTE pasted into a template's text is visible here and is caught here.
  */
-function checkNoNul(tokens: Token[]): Token[] {
+function checkNoNul(tokens: Token[]): void {
   const nul = String.fromCharCode(0);
   for (const t of tokens) {
     if (t.type === "str" && t.value.indexOf(nul) >= 0) throw nulLiteral("this string literal", t.line, t.col);
     if (t.type === "template" && t.value.indexOf(nul) >= 0) throw nulLiteral("this template literal", t.line, t.col);
   }
-  return tokens;
 }
 
 export function parse(source: string, opts: ParseOpts = {}): Program {

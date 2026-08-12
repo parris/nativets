@@ -1,7 +1,7 @@
 {
   "recordedAt": {
     "date": "2026-08-12",
-    "rev": "c2a4db3"
+    "rev": "92b166f"
   },
   "modules": {
     "ast.ts": {
@@ -138,7 +138,7 @@
       }
     },
     "ownership.ts": {
-      "sha256": "093c144e6fd1f34f",
+      "sha256": "0938e07172f5b0a1",
       "standalone": {
         "stage": "check",
         "code": "NT1003",
@@ -152,7 +152,7 @@
       }
     },
     "parser.ts": {
-      "sha256": "9a51b6111ac282a9",
+      "sha256": "9f584acbdf97c9e0",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -160,8 +160,8 @@
       },
       "linked": {
         "stage": "ownership",
-        "code": "NT1604",
-        "message": "[NT1604] cannot move out of `tokens`: it is borrowed (the owner is elsewhere)"
+        "code": "NT1601",
+        "message": "[NT1601] use of moved value: `deferred`"
       }
     }
   }
