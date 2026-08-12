@@ -705,7 +705,9 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // ...and NT1002 leaves in the same round: the monomorphizer's `structuredClone` was
     // redundant (see the note in src/checker.ts::specializeDecl). NT1011 takes its place,
     // held by the same six — the reflective walkers, 15 of them (test/walker-census.ts).
-    ["NT1004", "NT1011"],
+    // NT1011 out (the first typed walker), NT1606 back in — the ELEVENTH refill of this
+    // bucket, now `esc.rets.push` on a field of the definite-assignment escapes record.
+    ["NT1004", "NT1606"],
     );
     // RE-MEASURED AT THE MERGE, and NEITHER SIDE WAS RIGHT — which is the whole argument
     // for re-measuring instead of picking one. This lane's list still carried NT1009
@@ -978,16 +980,17 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // deferred.push -> a nullable Map value -> a stale `as` assertion), and what holds
     // them now is `cannot infer type of arrow parameter`.
     expect((byCode["NT2001"] ?? []).slice().sort()).toEqual([]);
-    // NT1606 IS EMPTY. `src/modules.ts` held it for all four, and the accumulator opt-in
-    // was not the answer: those `.push` sites are captured by a self-recursive ARROW, which
-    // is NT1607 — the closure rule, not the array rule. An `@@mutable` record with field
-    // rebinds for the DFS state, and a top-level function for `topLevelNames`' walk.
-    expect((byCode["NT1606"] ?? []).slice().sort()).toEqual([]);
-    // ...so the three that inherited it fall through to what checker.ts already had.
-    // `modules.ts` is not here: it is on parser.ts's NT1004, an ownership/codegen blocker
-    // this table's checker view does not show — the same place parser.ts itself sits.
+    // NT1606 EMPTIED once (src/modules.ts's DFS `.push`, answered by the CLOSURE rule and
+    // not the accumulator opt-in) and REFILLED with a different holder: `esc.rets.push` in
+    // checker.ts's definite-assignment escapes record, which the same six now inherit.
+    // `modules.ts` is not among them — it is on parser.ts's NT1004, an ownership/codegen
+    // blocker this table's checker view does not show, where parser.ts itself sits.
     expect((byCode["NT1002"] ?? []).slice().sort()).toEqual([]);
-    expect((byCode["NT1011"] ?? []).slice().sort()).toEqual(
+    // NT1011 empties: `daReads` is typed (the first of the reflective walkers, proved
+    // equivalent to the one it replaces across the corpus). The same six fall through to
+    // `esc.rets.push` — an array append on a field, which is NT1606 again.
+    expect((byCode["NT1011"] ?? []).slice().sort()).toEqual([]);
+    expect((byCode["NT1606"] ?? []).slice().sort()).toEqual(
       ["checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "ownership.ts"],
     );
     expect(byCode["NT1003"] ?? []).toEqual([]);
@@ -1079,7 +1082,11 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // four, not five, because parser.ts itself is checker-clean now and blames nobody.
     // EMPTY — src/modules.ts held it for all four, and the fix was the CLOSURE rule, not
     // the array one (see the note at the head of this file's NT1606 history).
-    expect((byCode["NT1606"] ?? []).slice().sort()).toEqual([]);
+    // REFILLED, by a different holder than the one the note above cleared: `esc.rets.push`
+    // on a field of checker.ts's definite-assignment escapes record.
+    expect((byCode["NT1606"] ?? []).slice().sort()).toEqual(
+      ["checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "ownership.ts"],
+    );
     // NT1702 — AN IMPORT CYCLE, and the one entry in this table that was not a missing
     // feature. `coverage.ts` and `coverage-preprocess.ts` imported each other, which the
     // linker refuses by design; it never had a chance to say so while ast.ts's refusal
@@ -1232,7 +1239,11 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // fall through TOGETHER onto the reflective walkers (`for (const x of node)` over
     // `unknown`, NT1011). Six modules, one site: checker.ts's `daReads`.
     expect((byCode["NT1002"] ?? []).slice().sort()).toEqual([]);
-    expect((byCode["NT1011"] ?? []).slice().sort()).toEqual(
+    // NT1011 empties: `daReads` is typed (the first of the reflective walkers, proved
+    // equivalent to the one it replaces across the corpus). The same six fall through to
+    // `esc.rets.push` — an array append on a field, which is NT1606 again.
+    expect((byCode["NT1011"] ?? []).slice().sort()).toEqual([]);
+    expect((byCode["NT1606"] ?? []).slice().sort()).toEqual(
       ["checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "ownership.ts"],
     );
     // diagnostics.ts has now been round the houses: NT1606 (`[...spans].sort()`, cleared by
@@ -1332,7 +1343,11 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // ...and NT1606 holds the four modules behind src/modules.ts (see the note above).
     // EMPTY — src/modules.ts held it for all four, and the fix was the CLOSURE rule, not
     // the array one (see the note at the head of this file's NT1606 history).
-    expect((byCode["NT1606"] ?? []).slice().sort()).toEqual([]);
+    // REFILLED, by a different holder than the one the note above cleared: `esc.rets.push`
+    // on a field of checker.ts's definite-assignment escapes record.
+    expect((byCode["NT1606"] ?? []).slice().sort()).toEqual(
+      ["checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "ownership.ts"],
+    );
     // ...and NT1014 EMPTIES: the identity-keyed `Expr` collections in src/parser.ts are
     // node stamps now and the `Map<string, Set<number>>` is a `Map<string, number[]>`.
     // The five move together to NT1001 (`Set<string>[]`), asserted above.
@@ -1481,7 +1496,11 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // itself is on an ownership blocker and no longer in this table's checker view.
     // EMPTY — src/modules.ts held it for all four, and the fix was the CLOSURE rule, not
     // the array one (see the note at the head of this file's NT1606 history).
-    expect((byCode["NT1606"] ?? []).slice().sort()).toEqual([]);
+    // REFILLED, by a different holder than the one the note above cleared: `esc.rets.push`
+    // on a field of checker.ts's definite-assignment escapes record.
+    expect((byCode["NT1606"] ?? []).slice().sort()).toEqual(
+      ["checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "ownership.ts"],
+    );
     expect(byCode["NT1003"] ?? []).toEqual([]);
     // NEW BUCKET, and it is one module deep: the captured-binding write behind the arrow.
     // ...and empty again: the cursor is one `//@@mutable` record now, so nothing writes a

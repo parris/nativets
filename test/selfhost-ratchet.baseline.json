@@ -1,7 +1,7 @@
 {
   "recordedAt": {
     "date": "2026-08-12",
-    "rev": "b823fd7"
+    "rev": "702478a"
   },
   "modules": {
     "ast.ts": {
@@ -18,7 +18,7 @@
       }
     },
     "checker.ts": {
-      "sha256": "e3214e3516c159ba",
+      "sha256": "dbee4f6cca8e03e7",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -26,8 +26,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1011",
-        "message": "[NT1011] for-of over unknown is not supported yet at L:C"
+        "code": "NT1606",
+        "message": "[NT1606] arrays are immutable: `esc.rets.push` would mutate the array in place at L:C"
       }
     },
     "cli.ts": {
@@ -40,8 +40,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1011",
-        "message": "[NT1011] for-of over unknown is not supported yet at L:C"
+        "code": "NT1606",
+        "message": "[NT1606] arrays are immutable: `esc.rets.push` would mutate the array in place at L:C"
       }
     },
     "codegen.ts": {
@@ -53,8 +53,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1011",
-        "message": "[NT1011] for-of over unknown is not supported yet at L:C"
+        "code": "NT1606",
+        "message": "[NT1606] arrays are immutable: `esc.rets.push` would mutate the array in place at L:C"
       }
     },
     "coverage-preprocess.ts": {
@@ -80,8 +80,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1011",
-        "message": "[NT1011] for-of over unknown is not supported yet at L:C"
+        "code": "NT1606",
+        "message": "[NT1606] arrays are immutable: `esc.rets.push` would mutate the array in place at L:C"
       }
     },
     "diagnostics.ts": {
@@ -107,8 +107,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1011",
-        "message": "[NT1011] for-of over unknown is not supported yet at L:C"
+        "code": "NT1606",
+        "message": "[NT1606] arrays are immutable: `esc.rets.push` would mutate the array in place at L:C"
       }
     },
     "lexer.ts": {
@@ -147,12 +147,12 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1011",
-        "message": "[NT1011] for-of over unknown is not supported yet at L:C"
+        "code": "NT1606",
+        "message": "[NT1606] arrays are immutable: `esc.rets.push` would mutate the array in place at L:C"
       }
     },
     "parser.ts": {
-      "sha256": "6f1acdf13aab6896",
+      "sha256": "0d36aedd8c4ef736",
       "standalone": {
         "stage": "check",
         "code": "NT2001",

@@ -532,7 +532,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // stop being OPTIONAL because the marker rejects `?U…[]`), the catch binding still typing
   // `string` (needed transitive raise inference), and `program.body = …` (NT1606, now a new
   // `Program` at the return). It now stops on `structuredClone` of the recursive `FuncDecl`.
-  "checker.ts": { rung: 0, code: "NT1011", blame: "self" },
+  "checker.ts": { rung: 0, code: "NT1606", blame: "self" },
   // Left NT1015 (static members) and reached further — an unnamed parse error at 582:33.
   // ...then NT1023 on `ModuleGen.build`, same accumulator shape, same `//@@mutable` fix,
   // and behind it NT1015 again — this time a `get` accessor in `FnGen`, ~165 lines deeper.
@@ -543,7 +543,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // Left NT1002 when `in` landed. MEASURED, not assumed: the lane predicted codegen.ts
   // would stop on its OWN four `Record` tables, and it does not — ast.ts's HOST_MODULES
   // fires first through the link. Its own tables are the same shape and sit behind it.
-  "codegen.ts": { rung: 0, code: "NT1011", blame: "checker.ts" },   // inherited — see checker.ts
+  "codegen.ts": { rung: 0, code: "NT1606", blame: "checker.ts" },   // inherited — see checker.ts
   // The NT1702 is GONE, and it was never a missing language feature — it was a defect in
   // the compiler's OWN module graph. `coverage.ts → coverage-preprocess.ts → coverage.ts`,
   // closed by `import type { Blocker }`. node and bun erase that edge, so the cycle did not
@@ -558,7 +558,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // Both rows moved to their real blockers, and the blame column is the interesting part:
   // coverage.ts is clean on its own and inherits ast.ts's, exactly as this file predicted
   // below; coverage-preprocess.ts finally has one of its OWN.
-  "coverage.ts": { rung: 0, code: "NT1011", blame: "checker.ts" },
+  "coverage.ts": { rung: 0, code: "NT1606", blame: "checker.ts" },
   // Still inherits checker.ts's blocker, and has now followed it through THREE codes —
   // NT1009 -> NT1606 -> NT1027 — without ever having a blocker of its own under the link.
   // The long-standing "ownership.ts is credited with checker.ts's problem" attribution
@@ -575,8 +575,8 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // The Map spread in `clone` was the one blocker this module ever owned in the STANDALONE
   // column, and clearing it makes that column BLIND: what it reports now is the unlinked-import
   // artifact (see the ratchet baseline). Linked, it still inherits, as it always has.
-  "ownership.ts": { rung: 0, code: "NT1011", blame: "checker.ts" }, // inherited — see checker.ts
-  "driver.ts": { rung: 0, code: "NT1011", blame: "checker.ts" },
+  "ownership.ts": { rung: 0, code: "NT1606", blame: "checker.ts" }, // inherited — see checker.ts
+  "driver.ts": { rung: 0, code: "NT1606", blame: "checker.ts" },
   // Stage-1's entry point now stops on its OWN code for the first time: calling the async
   // `buildBinary` without `await`. Not a dependency's blocker.
   //
@@ -605,7 +605,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // reflective `mapTypesDeep`. NT2001 is now EMPTY tree-wide — cli.ts was its last holder,
   // and it only ever held it because this lane had not landed yet. Sixth time a merge here
   // produced a frontier neither side could have computed from its own diff.
-  "cli.ts": { rung: 0, code: "NT1011", blame: "checker.ts" },
+  "cli.ts": { rung: 0, code: "NT1606", blame: "checker.ts" },
   // Followed parser.ts through the link: when parser.ts stopped blaming itself, the three
   // modules that inherited its `?.[]` all moved to ast.ts's NT1030 together.
   // Followed ast.ts off the entries form onto ast.ts's `HOST_MODULES` Record literal.
@@ -760,7 +760,10 @@ const STAGE1: Entry = { file: "cli.ts", path: () => pathOf("cli.ts"), argv: () =
 // `mapTypesDeepStmt` rebuilds on the next line anyway, so it came out — and stage-1 now
 // reaches the REFLECTIVE WALKERS, `for (const x of node)` over `unknown` in `daReads`.
 // Six modules land on that one site together (test/walker-census.ts: 15 walkers left).
-const STAGE1_BASELINE: { rung: Rung; code: string } = { rung: 0, code: "NT1011" };
+// NT1011 -> NT1606: `daReads` is TYPED now (test/da-reads-typed.test.ts proves it
+// equivalent to the reflective walker it replaces, across the corpus), so the walker that
+// blocked six modules is gone. Behind it: `esc.rets.push` on a field of the escapes record.
+const STAGE1_BASELINE: { rung: Rung; code: string } = { rung: 0, code: "NT1606" };
 
 describe("SH6: the instrument itself — the upper rungs are exercised, not dead code", () => {
   /**
@@ -1440,7 +1443,7 @@ describe("SH6: differential self-compilation (bun-run compiler is the oracle)", 
       // carries an env even over a list declared inside it. Stage-1 now reaches NT1002,
       // `structuredClone` of a recursive type, in checker.ts — a fifth statement of this
       // file's recurring lesson: clearing the largest term reveals the next one.
-      expect(m.code).toBe("NT1011");
+      expect(m.code).toBe("NT1606");
       expect(m.error.length).toBeGreaterThan(0);
       return;
     }
