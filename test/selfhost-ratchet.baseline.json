@@ -1,7 +1,7 @@
 {
   "recordedAt": {
     "date": "2026-08-12",
-    "rev": "17dfffe"
+    "rev": "b823fd7"
   },
   "modules": {
     "ast.ts": {
@@ -18,7 +18,7 @@
       }
     },
     "checker.ts": {
-      "sha256": "257a7cecde1fc1d8",
+      "sha256": "e3214e3516c159ba",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -26,8 +26,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1002",
-        "message": "[NT1002] structuredClone of the recursive type {kind:string,name:string,params:@_nt_m0_Param[],returnAnnot:?Ustring,body:@_nt_m0_Stmt[],endDrops:?Ustring[],typeParams:undefined,copyThis:?Uboolean,sett…"
+        "code": "NT1011",
+        "message": "[NT1011] for-of over unknown is not supported yet at L:C"
       }
     },
     "cli.ts": {
@@ -40,8 +40,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1002",
-        "message": "[NT1002] structuredClone of the recursive type {kind:string,name:string,params:@_nts0_m2_Param[],returnAnnot:?Ustring,body:@_nts0_m2_Stmt[],endDrops:?Ustring[],typeParams:undefined,copyThis:?Uboolean,…"
+        "code": "NT1011",
+        "message": "[NT1011] for-of over unknown is not supported yet at L:C"
       }
     },
     "codegen.ts": {
@@ -53,8 +53,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1002",
-        "message": "[NT1002] structuredClone of the recursive type {kind:string,name:string,params:@_nt_m0_Param[],returnAnnot:?Ustring,body:@_nt_m0_Stmt[],endDrops:?Ustring[],typeParams:undefined,copyThis:?Uboolean,sett…"
+        "code": "NT1011",
+        "message": "[NT1011] for-of over unknown is not supported yet at L:C"
       }
     },
     "coverage-preprocess.ts": {
@@ -80,8 +80,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1002",
-        "message": "[NT1002] structuredClone of the recursive type {kind:string,name:string,params:@_nts0_m0_Param[],returnAnnot:?Ustring,body:@_nts0_m0_Stmt[],endDrops:?Ustring[],typeParams:undefined,copyThis:?Uboolean,…"
+        "code": "NT1011",
+        "message": "[NT1011] for-of over unknown is not supported yet at L:C"
       }
     },
     "diagnostics.ts": {
@@ -107,8 +107,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1002",
-        "message": "[NT1002] structuredClone of the recursive type {kind:string,name:string,params:@_nts0_m2_Param[],returnAnnot:?Ustring,body:@_nts0_m2_Stmt[],endDrops:?Ustring[],typeParams:undefined,copyThis:?Uboolean,…"
+        "code": "NT1011",
+        "message": "[NT1011] for-of over unknown is not supported yet at L:C"
       }
     },
     "lexer.ts": {
@@ -147,8 +147,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1002",
-        "message": "[NT1002] structuredClone of the recursive type {kind:string,name:string,params:@_nt_m0_Param[],returnAnnot:?Ustring,body:@_nt_m0_Stmt[],endDrops:?Ustring[],typeParams:undefined,copyThis:?Uboolean,sett…"
+        "code": "NT1011",
+        "message": "[NT1011] for-of over unknown is not supported yet at L:C"
       }
     },
     "parser.ts": {

@@ -702,7 +702,10 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // survives its scanners), and `topLevelNames`' walk became a TOP-LEVEL FUNCTION,
     // because a self-recursive arrow carries an env even over a list declared inside it.
     // Nothing takes NT1606's place: the set is down to two codes for the first time.
-    ["NT1002", "NT1004"],
+    // ...and NT1002 leaves in the same round: the monomorphizer's `structuredClone` was
+    // redundant (see the note in src/checker.ts::specializeDecl). NT1011 takes its place,
+    // held by the same six — the reflective walkers, 15 of them (test/walker-census.ts).
+    ["NT1004", "NT1011"],
     );
     // RE-MEASURED AT THE MERGE, and NEITHER SIDE WAS RIGHT — which is the whole argument
     // for re-measuring instead of picking one. This lane's list still carried NT1009
@@ -983,7 +986,8 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // ...so the three that inherited it fall through to what checker.ts already had.
     // `modules.ts` is not here: it is on parser.ts's NT1004, an ownership/codegen blocker
     // this table's checker view does not show — the same place parser.ts itself sits.
-    expect((byCode["NT1002"] ?? []).slice().sort()).toEqual(
+    expect((byCode["NT1002"] ?? []).slice().sort()).toEqual([]);
+    expect((byCode["NT1011"] ?? []).slice().sort()).toEqual(
       ["checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "ownership.ts"],
     );
     expect(byCode["NT1003"] ?? []).toEqual([]);
@@ -1223,8 +1227,12 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // `structuredClone` of the recursive `FuncDecl` type, which is what they landed on
     // after five blockers came off in one sitting (see the NT2001 note above). Asserted
     // as a MEMBERSHIP rather than `toBeUndefined()` so the next move names its holders.
-    // The three that used to sit on src/modules.ts's NT1606 fall through to here now.
-    expect((byCode["NT1002"] ?? []).slice().sort()).toEqual(
+    // NT1002 IS EMPTY. The monomorphizer's `structuredClone` was deep-copying a `FuncDecl`
+    // that `mapTypesDeepStmt` rebuilds on the very next line, so it came out — and all six
+    // fall through TOGETHER onto the reflective walkers (`for (const x of node)` over
+    // `unknown`, NT1011). Six modules, one site: checker.ts's `daReads`.
+    expect((byCode["NT1002"] ?? []).slice().sort()).toEqual([]);
+    expect((byCode["NT1011"] ?? []).slice().sort()).toEqual(
       ["checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "ownership.ts"],
     );
     // diagnostics.ts has now been round the houses: NT1606 (`[...spans].sort()`, cleared by
