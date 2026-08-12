@@ -469,3 +469,72 @@ console.log(c.t("a"));
     expect(r.code).toBe("NT2001");
   });
 });
+
+/*
+ * NESTED TYPE-ARGUMENT CLOSE — `Map<string, Set<number>>`, where the lexer hands the
+ * parser one `>>` (or `>>>`) token because those are the shift operators.
+ *
+ * `eatTypeClose` split that token IN PLACE: `t.value = t.value.slice(1)`, leaving a `>`
+ * for the enclosing list to close with. That works exactly once. The token array is
+ * SHARED with every sub-parser — `hoistTypeDecls` re-parses each type declaration from a
+ * saved index through `new Parser(this.toks, …)`, and `resolveCycle` does it again — so
+ * the hoist pass consumed one `>` and the main parse then found the list one `>` short:
+ *
+ *     type G = Array<Array<number>>;
+ *     error[NT0001]: Expected '>' but found ';' at 1:30      // node: fine
+ *
+ * A SPURIOUS REFUSAL, not a miscompile — but of valid TypeScript that node runs, and it
+ * hit exactly the two positions that are hoisted (a type alias, an interface member)
+ * while the same type in a parameter, a variable annotation or a return type — parsed
+ * once — worked. That split is why `Map<string, Set<number>>` had to be spelled around
+ * in this compiler's own source.
+ *
+ * The fix stops mutating the stream: the split is recorded in a parser-LOCAL map from
+ * token index to how many of its `>` have been consumed, so each Parser closes the same
+ * token independently and the tokens themselves are never written.
+ *
+ * `>>` MUST STILL NOT BE CONSUMED EARLY. `sec<Array<Array<number>>, string>` closes two
+ * lists at a `>>` that is followed by a `,` belonging to the OUTER list; a fix that ate
+ * the whole token at the inner close would let the outer list keep reading and swallow
+ * `string` as a third argument to the inner one. So the position must not advance until
+ * the last `>` is spent — n5/n6 are that case, and they passed before this fix.
+ */
+describe("nested type-argument close (`>>`)", () => {
+  test("n1. two levels in a type ALIAS — the hoisted position that was refused", async () => {
+    expect(await matches(`type G = Array<Array<number>>;\nconst a: G = [[1, 2], [3]];\nconsole.log(a.length, a[0]!.length, a[1]![0]);\n`)).toBe("2 2 3\n");
+  });
+
+  test("n2. two levels in an INTERFACE member — the other hoisted position", async () => {
+    expect(await matches(`interface W { g: Array<Array<number>>; }\nconst w: W = { g: [[4, 5]] };\nconsole.log(w.g[0]![1]);\n`)).toBe("5\n");
+  });
+
+  test("n3. three levels (`>>>`) in an alias", async () => {
+    expect(await matches(`type D = Array<Array<Array<number>>>;\nconst d: D = [[[7]]];\nconsole.log(d[0]![0]![0]);\n`)).toBe("7\n");
+  });
+
+  // All three in ONE file on purpose. Each worked alone, and together they did not: the
+  // annotation's `(`-lookahead runs `parseParenOrFuncType`, whose speculative parse split
+  // a `>>` and then threw, leaving the token short for the parse that followed.
+  // `f` READS its argument rather than returning it — handing back a borrowed parameter is
+  // NT1604 and has nothing to do with the close (the first draft of this test did that,
+  // and the refusal it earned looked like a parse failure).
+  test("n4. the positions that always worked keep working: annotation, param, return", async () => {
+    expect(await matches(`const v: Array<Array<number>> = [[1]];\nfunction f(g: Array<Array<number>>): number { return g[0]![0]!; }\nfunction mk(): Array<Array<number>> { return [[9]]; }\nconsole.log(v[0]![0], f([[2]]), mk()[0]![0]);\n`)).toBe("1 2 9\n");
+  });
+
+  test("n5. `>>` followed by a COMMA of the enclosing list is not eaten early", async () => {
+    expect(await matches(`function sec<A, B>(a: A, b: B): B { return b; }\nconsole.log(sec<Array<Array<number>>, string>([[1]], "x"));\n`)).toBe("x\n");
+  });
+
+  test("n6. `>>>` followed by a comma, likewise", async () => {
+    expect(await matches(`function sec<A, B>(a: A, b: B): B { return b; }\nconsole.log(sec<Array<Array<Array<number>>>, string>([[[1]]], "y"));\n`)).toBe("y\n");
+  });
+
+  test("n7. the SHIFT operators the `>>` token exists for are untouched", async () => {
+    expect(await matches(`console.log(8 >> 1, -8 >>> 28, 1 << 3, 5 >> 0);\n`)).toBe("4 15 8 5\n");
+  });
+
+  test("n8. an alias used TWICE — the hoist fixpoint re-parses, and must still close", async () => {
+    expect(await matches(`type G = Array<Array<number>>;\ninterface H { a: G; b: Array<Array<number>>; }\nconst h: H = { a: [[1]], b: [[2]] };\nconsole.log(h.a[0]![0], h.b[0]![0]);\n`)).toBe("1 2\n");
+  });
+});

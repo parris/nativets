@@ -908,3 +908,42 @@ still printed "0 mismatches". That is the project's recurring vacuity failure in
 each group now screens its OWN prelude and says *"this group measured NOTHING"* out loud. It
 fired immediately: generic classes are refused, and with `Box` in a shared prelude the nineteen
 generic-FUNCTION cases would have silently measured nothing at all.
+
+## The nested type-argument close — a token the parser split IN PLACE
+
+`Map<string, Set<number>>` reaches the parser as ONE `>>` token, because those are the shift
+operators. `eatTypeClose` handled that by rewriting the token — `t.value = t.value.slice(1)` —
+leaving a `>` for the enclosing list. Correct exactly once, and the token array is **shared**:
+`hoistTypeDecls` re-parses every type declaration from a saved index through
+`new Parser(this.toks, …)`, and `resolveCycle` does it again. So the hoist pass spent one `>`
+and the main parse found the list a `>` short:
+
+```
+type G = Array<Array<number>>;
+error[NT0001]: Expected '>' but found ';' at 1:30          # node: fine
+```
+
+A spurious refusal of valid TypeScript, not a miscompile — but it hit **exactly the hoisted
+positions**: a type alias and an interface member. The same type as a parameter, a variable
+annotation or a return type was parsed once and worked, which is why the shape looked supported.
+It is why this compiler's own source spells `Map<string, Set<number>>` around.
+
+**The second carrier was backtracking.** `parseParenOrFuncType` speculatively parses a function
+type and restores `pos` on failure; `tryCallTypeArgs` restores `pos` even after a SUCCESSFUL
+parse that turned out not to be a call. Neither could restore a token that had already been
+rewritten, so an annotation and a return type that each worked alone failed in the same file.
+
+**The fix removes the mutation.** The split is now two parser-LOCAL scalars — which `>>`/`>>>`
+token is being spent, and how many of its `>` this parser has taken. At most one token is ever
+partly spent (a partial spend means we are between the closes of nested lists, and they all
+target the same token), so it needs no map. Both backtrack sites save and restore it with `pos`.
+
+**What it must not do is consume the token early.** `sec<Array<Array<number>>, string>` closes
+two lists at a `>>` whose next token is the *outer* list's comma; advancing past the whole token
+at the inner close lets the inner list keep reading and swallow `string` as a third argument of
+its own. The position holds until the last `>` is spent. `test/generics.test.ts` n5/n6 pin that
+case, and they passed **before** the fix — they are there to keep the fix from buying the alias
+back at their expense.
+
+Found while chasing something else: `peek()` returning an array element is `NT1605`, and the
+in-place split was what stopped `peek` from returning a copy. Eight cases, five red before.

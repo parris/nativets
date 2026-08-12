@@ -388,6 +388,22 @@ class Parser {
    * resolves to. Those keep the old source-order behavior.
    */
   private typeDeclStarts = new Map<string, number>();
+  /**
+   * The `>>` / `>>>` token whose `>`s are being spent one nested type-argument list at a
+   * time — its INDEX, and how many of them this parser has taken (see `eatTypeClose`).
+   *
+   * Two scalars rather than a map because AT MOST ONE token is ever partly spent: a
+   * partial spend means we are between the closes of nested lists, and every one of those
+   * closes targets the SAME token. Any other `>>` belongs to a list already closed.
+   *
+   * Parser-LOCAL, which is the whole point — this state used to live in the token itself
+   * (`t.value = t.value.slice(1)`) and the token array is shared with every sub-parser.
+   */
+  // ANNOTATED: a class field initialized to `-1` is NT1015 here (the initializer is a
+  // unary expression, not a literal the field type can be read off). `blocker-metric`
+  // reported it the moment this field was added — the subset rule this file lives under.
+  private angleTok: number = -1;
+  private angleSpent: number = 0;
   /** The `interface`/`type` name whose own body is being parsed — a reference to it from
    *  in there is RECURSIVE, which reordering cannot fix, so it is reported differently. */
   private declaringType: string | undefined;
@@ -1983,14 +1999,18 @@ class Parser {
    * leave the remainder in place for the enclosing list to close with.
    */
   private eatTypeClose(): void {
-    // `//@@mutable` on the BINDING, not on the `Token` type: the attribute permits the
-    // in-place field store without making the type nominal. Marking the type instead was
-    // measured and regressed the frontier — a nominal member stops unifying structurally,
-    // so reads through the union break (docs/self-hosting.md).
-    //@@mutable
+    const i = this.pos;
     const t = this.peek();
     if (t.type === "punct" && (t.value === ">>" || t.value === ">>>")) {
-      t.value = t.value.slice(1); // leaves `>` (or `>>`) for the outer level
+      const spent = (this.angleTok === i ? this.angleSpent : 0) + 1;
+      // NOT CONSUMED until the last `>` is spent. `sec<Array<Array<number>>, string>`
+      // closes two lists at a `>>` whose next token is the OUTER list's comma; advancing
+      // past the whole token at the inner close would let the inner list keep reading and
+      // swallow `string` as a third argument of its own (test/generics.test.ts n5/n6).
+      if (spent < t.value.length) { this.angleTok = i; this.angleSpent = spent; return; }
+      this.angleTok = -1;
+      this.angleSpent = 0;
+      this.next();
       return;
     }
     this.eat(">");
@@ -2030,7 +2050,12 @@ class Parser {
    */
   private parseParenOrFuncType(): Ty {
     const save = this.pos;
-    try { return this.parseFuncType(); } catch { this.pos = save; }
+    // The half-spent `>>` goes back too. A speculative parse that closed one level of a
+    // nested list and then failed used to leave the token PERMANENTLY split, so the retry
+    // read `Array<Array<number>>` one `>` short — which is why the annotation and the
+    // return type each worked alone but not in the same file (test/generics.test.ts n4).
+    const saveTok = this.angleTok, saveSpent = this.angleSpent;
+    try { return this.parseFuncType(); } catch { this.pos = save; this.angleTok = saveTok; this.angleSpent = saveSpent; }
     this.eat("(");
     const inner = this.parseType();
     this.eat(")");
@@ -4298,15 +4323,22 @@ class Parser {
   // `x < f(y)`, `a < b > c`) untouched.
   private tryCallTypeArgs(): Ty[] | null {
     const save = this.pos;
+    // Restored on BOTH backtracks, including the one after a SUCCESSFUL `parseTypeArgs`
+    // that simply was not followed by `(` — `a < b >> c` reaches here.
+    const saveTok = this.angleTok, saveSpent = this.angleSpent;
     let tys: Ty[];
     try {
       tys = this.parseTypeArgs();
     } catch {
       this.pos = save;
+      this.angleTok = saveTok;
+      this.angleSpent = saveSpent;
       return null;
     }
     if (this.at("(")) return tys;
     this.pos = save;
+    this.angleTok = saveTok;
+    this.angleSpent = saveSpent;
     return null;
   }
 
