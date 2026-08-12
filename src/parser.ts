@@ -584,7 +584,27 @@ class Parser {
   /** Whether the function body currently being parsed declares such a return type — the
    *  one thing that makes `return <an async function>` legal (see parseReturn). */
   private returnsAsyncFnStack: boolean[] = [];
-  private identCalls: { node: Expr; name: string; line: number; col: number; scopedAsync?: boolean }[] = [];
+  /**
+   * Calls to record for the floating-async guard, keyed by the CALL'S OWN POSITION rather
+   * than by holding its node.
+   *
+   * `node: Expr` used to be the first field, and the AST held the same pointer — two owners
+   * on purpose, so that an `awaited` stamp applied LATER travelled for free. The linear
+   * ownership model has no spelling for that (NT1601 at `expr = call`), and it is the one
+   * refusal in this file that no rearrangement could answer.
+   *
+   * `callLine`/`callCol` are the `(` token's position, which is unique within a file:
+   * measured over this compiler's own twelve modules, 10,135 `CallExpr` nodes, ZERO
+   * duplicate locs. A template substitution is rebased (`rebaseTokens`) into the outer
+   * template's span, where the outer file has one token and no other node can land.
+   *
+   * `line`/`col` stay the CALLEE's position — that is what the diagnostic points at.
+   */
+  private identCalls: { callLine: number; callCol: number; name: string; line: number; col: number; scopedAsync?: boolean }[] = [];
+  /** Calls written `await f()`, as `line:col` of the call's `(` — the loc key replacing the
+   *  `CallExpr.awaited` read. Merged from a substitution sub-parser, which the stamp did not
+   *  need to be (see `parseSubstitution`). */
+  private awaitedCallLocs = new Set<string>();
   /** True while parsing the ctor body of a class that `extends Error` — enables `super(msg)`
    *  (desugared to `this.message = msg`, since nativets models Error as `{message:string}`). */
   private inErrorCtor = false;
@@ -1497,22 +1517,24 @@ class Parser {
     //
     // Never index -1: an empty body is ordinary, and there node answers `undefined` while
     // nativets PANICS on the read (test/tsc.test.ts). The walk handles it by never running.
-    let entryIdx = -1;
+    let entryLine = -1;
+    let entryCol = -1;
     let seen = 0;
     for (const s of body) {
       seen++;
       if (seen !== body.length || s.kind !== "ExprStmt") continue;
-      let j = 0;
-      for (const c of this.identCalls) {
-        if (c.node === s.expr) entryIdx = j;
-        j++;
-      }
+      const e = s.expr;
+      if (e.kind !== "CallExpr") continue;
+      const l = e.loc;
+      // A synthesized call carries no `loc` (the decorator applications `parseClass` emits
+      // are the only ones — measured: 1 of 10,135). Leaving the entry position at -1 grants
+      // no exception, which is the safe direction: such a node is never a user's `main();`.
+      if (l !== undefined) { entryLine = l.line; entryCol = l.col; }
     }
-    let idx = -1;
     for (const c of this.identCalls) {
-      idx++;
       if (!(c.scopedAsync || this.asyncFns.has(c.name))) continue;
-      if ((c.node.kind === "CallExpr" && (c.node.awaited ?? false)) || idx === entryIdx) continue;
+      if (this.awaitedCallLocs.has(`${c.callLine}:${c.callCol}`)) continue;
+      if (c.callLine === entryLine && c.callCol === entryCol) continue;
       throw nyi(
         NYI.ASYNC,
         `calling async function '${c.name}' without 'await' at ${c.line}:${c.col} (its value is a Promise under node; nativets runs it to completion immediately)`,
@@ -4372,8 +4394,14 @@ class Parser {
       this.eat("await");
       //@@mutable
       const operand = this.parseUnary();
-      // STAMPED on the node, not collected in a `Set<Expr>` — see `CallExpr.awaited`.
-      if (operand.kind === "CallExpr") operand.awaited = true;
+      // STAMPED on the node (see `CallExpr.awaited`, which codegen and the checker read)
+      // AND recorded by position, which is what the floating-async guard now consults: that
+      // guard no longer holds the node, so the stamp no longer reaches it.
+      if (operand.kind === "CallExpr") {
+        operand.awaited = true;
+        const l = operand.loc;
+        if (l !== undefined) this.awaitedCallLocs = this.awaitedCallLocs.add(`${l.line}:${l.col}`);
+      }
       return operand;
     }
     if (this.at("typeof")) { this.eat("typeof"); return { kind: "TypeofExpr", operand: this.parseUnary() }; }
@@ -4554,43 +4582,39 @@ class Parser {
         }
         this.eat(")");
         const callLoc = { line: lp.line, col: lp.col, file: this.file };
-        // Built into a CONST first, and with ONE literal rather than a ternary. Two things
-        // are wrong with the shape this replaces: the ternary's arms differ (`typeArgs`
-        // present in one, absent in the other), and `expr` is a `let` REASSIGNED IN A
-        // LOOP, so a tag test on it below cannot narrow — every `expr.callee` read was
-        // `Property 'callee' does not exist on <the Expr union>`.
+        // THE CALLEE IS INSPECTED BEFORE THE NODE IS BUILT, not after. Everything below used
+        // to read `call.callee`, which is this same value — but the literal MOVES it (and
+        // `args`), so every one of those reads came after the handoff (NT1601). Nothing here
+        // needs the finished node; it all asks about the callee and the arguments.
         //
-        // `typeArgs: pendingTypeArgs ?? undefined` says exactly what the absent key said:
-        // the field is optional and every reader is `e.typeArgs?.length`.
-        const call: CallExpr = {
-          kind: "CallExpr", callee: expr, args, typeArgs: pendingTypeArgs ?? undefined, loc: callLoc,
-        };
-        expr = call;
-        pendingTypeArgs = null;
+        // Aliased to a CONST because `expr` is a `let` REASSIGNED IN A LOOP, so a tag test
+        // on it does not narrow — every `expr.callee` read was `Property 'callee' does not
+        // exist on <the Expr union>`. That is why the old code aliased it to `call`.
+        const callee = expr;
         // Record plain `f(...)` calls so an un-awaited call to an `async function`
         // can be rejected after the whole program is parsed (see checkFloatingAsyncCalls).
-        if (call.callee.kind === "Identifier") {
-          const loc = call.callee.loc ?? { line: 0, col: 0 };
-          const scopedAsync = this.inAsyncParamScope(call.callee.name);
-          this.identCalls.push({ node: call, name: call.callee.name, line: loc.line, col: loc.col, scopedAsync });
-        } else if (call.callee.kind === "ArrowFunction" && (call.callee.isAsync ?? false)) {
+        if (callee.kind === "Identifier") {
+          const loc = callee.loc ?? { line: 0, col: 0 };
+          const scopedAsync = this.inAsyncParamScope(callee.name);
+          this.identCalls.push({ callLine: callLoc.line, callCol: callLoc.col, name: callee.name, line: loc.line, col: loc.col, scopedAsync });
+        } else if (callee.kind === "ArrowFunction" && (callee.isAsync ?? false)) {
           // An immediately-invoked async arrow, `(async () => …)()`. It never binds a
           // name, so the name-based path above cannot see it; the callee NODE is the
           // identity. Recorded under a descriptive name so the guard reads the same.
-          this.identCalls.push({ node: call, name: "(async arrow)", line: callLoc.line, col: callLoc.col });
+          this.identCalls.push({ callLine: callLoc.line, callCol: callLoc.col, name: "(async arrow)", line: callLoc.line, col: callLoc.col });
           this.asyncFns = this.asyncFns.add("(async arrow)"); // not a legal identifier, so it collides with nothing
-        } else if (call.callee.kind === "CallExpr" && call.callee.callee.kind === "Identifier" &&
-                   this.returnsAsyncFn.has(call.callee.callee.name)) {
+        } else if (callee.kind === "CallExpr" && callee.callee.kind === "Identifier" &&
+                   this.returnsAsyncFn.has(callee.callee.name)) {
           // `pick()()`, where `pick(): () => Promise<T>` — the callee is the RESULT of a
           // call, so there is no name; the declared return type is the identity.
-          const label = `${call.callee.callee.name}()`;
-          this.identCalls.push({ node: call, name: label, line: callLoc.line, col: callLoc.col });
+          const label = `${callee.callee.name}()`;
+          this.identCalls.push({ callLine: callLoc.line, callCol: callLoc.col, name: label, line: callLoc.line, col: callLoc.col });
           this.asyncFns = this.asyncFns.add(label); // `pick()` is not an identifier, so it collides with nothing
         }
         // Record every argument that could hand an ASYNC function VALUE across this call —
         // the one place the guard's name tracking ends. Resolved after the file is parsed
         // (see checkAsyncEscapes): both the callee and an `async function` argument hoist.
-        const calleeName = call.callee.kind === "Identifier" ? call.callee.name : null;
+        const calleeName = callee.kind === "Identifier" ? callee.name : null;
         args.forEach((a, i) => {
           const asyncArrow = a.kind === "ArrowFunction" && (a.isAsync ?? false);
           if (!asyncArrow && a.kind !== "Identifier") return;
@@ -4601,6 +4625,15 @@ class Parser {
             line: callLoc.line, col: callLoc.col,
           });
         });
+        // BUILT LAST, once `callee` and `args` are no longer read. `typeArgs: pendingTypeArgs
+        // ?? undefined` says exactly what the absent key said — the field is optional and
+        // every reader is `e.typeArgs?.length` — which is why this is ONE literal and not a
+        // ternary whose arms differ in shape.
+        const call: CallExpr = {
+          kind: "CallExpr", callee, args, typeArgs: pendingTypeArgs ?? undefined, loc: callLoc,
+        };
+        expr = call;
+        pendingTypeArgs = null;
       } else if (this.at("<") && (pendingTypeArgs = this.tryCallTypeArgs())) {
         // Call-site type arguments `f<T>(x)` / `foo<string>()` — RECORDED on the call so
         // M3 can pin the instantiation explicitly (they were previously erased). Only
@@ -4872,7 +4905,11 @@ class Parser {
     for (const c of sub.identCalls) this.identCalls.push(c);
     for (const e of sub.asyncEscapes) this.asyncEscapes.push(e);
     for (const r of sub.returnEscapes) this.returnEscapes.push(r);
-    // (no `awaitedCalls` merge: the stamp lives on the shared node and travels for free)
+    // The awaited POSITIONS have to come back now. They used to travel for free on the
+    // shared node; the guard reads `awaitedCallLocs` instead, and that is per-parser state.
+    // Without this merge `` `${await one()}` `` is refused as floating — the exact failure
+    // the seed/harvest note above describes for the other direction.
+    for (const k of sub.awaitedCallLocs) this.awaitedCallLocs = this.awaitedCallLocs.add(k);
     // (no `asyncFnExprs` merge either: the stamp is on the shared node)
     for (const n of sub.hostImports) this.hostImports = this.hostImports.add(n);
     return out;

@@ -5478,13 +5478,26 @@ unique within a file, and `rebaseTokens` maps a substitution's tokens into the o
 template's span where no other token lives — so no collision. `awaited` would push a loc
 into a list instead of stamping a shared node, and the guard would compare two ints.
 
-It is **not** done here, and the reason is worth writing down rather than leaving implied:
-this guard has a silent-wrong-answer in its history (`` `${one()}` `` printed `1` where
-node prints `[object Promise]`, both exit 0), and a redesign of it earns its own red test
-first. `test/floating-async.test.ts` now pins the acceptance rule in both directions —
-dropping the exception reds f1/f5, widening it to any `ExprStmt` reds f2/f6 — which is the
-harness that redesign needs and did not have when this was written.
+**DONE.** The alias is gone. `identCalls` stores `callLine`/`callCol`, `await f()` records
+the same position in an `awaitedCallLocs` set as well as stamping the node, and the guard
+compares integers. The premise was measured first, not assumed: **10,135 `CallExpr` nodes
+across all twelve `src` modules, ZERO duplicate locs**, and exactly one node carrying no
+loc at all — a decorator application `parseClass` synthesizes, which never enters
+`identCalls` (and where a missing loc grants no exception, the safe direction).
 
-Behind the alias, a probe (pushes stubbed, `expr = call` moved to the end of the branch)
-reports `args` moved into the call literal and then read by the `forEach` below it — an
-ordinary reorder. So the alias is a real wall, but it is not obviously a deep one.
+The merge in `parseSubstitution` had to change with it. It carried no awaited list before,
+because "the stamp lives on the shared node and travels for free" — that was the sharing
+being load-bearing, stated outright. It now merges `awaitedCallLocs`, and REMOVING that
+merge reds the substitution suite's awaited case, so the dependency is pinned rather than
+remembered.
+
+This guard has a silent-wrong-answer in its history (`` `${one()}` `` printed `1` where
+node prints `[object Promise]`, both exit 0), so the redesign was gated on a harness for
+it. `test/floating-async.test.ts` was written first and verified non-vacuous by breaking
+the rule three ways against the NEW code: dropping the exception reds f1/f5 and the
+substitution case, widening it to any `ExprStmt` reds f6, removing the merge reds the
+substitution case.
+
+Behind the alias the ordering still had to change — everything read `call.callee` and
+`args` *after* the literal moved them — and then `parser.ts` walks on to the next refusal
+(`args[0]!` in the `Error` constructor lowering). The wall was real; it was one wall.
