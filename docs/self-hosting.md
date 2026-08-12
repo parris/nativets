@@ -5646,3 +5646,48 @@ answer the existing refusal exists to prevent.
 `scanEscaping`, a new `ThrowStmt.drops`-shaped annotation on call sites from `ownership.ts`,
 and a third arm in `emitExcCheck`. Beginning it and leaving it half-wired would produce
 exactly the failure mode the current refusal is protecting.
+
+
+## AFTER NT1002: six modules share ONE blocker, and it is the walker item — measured at 15
+
+Dropping the monomorphizer's redundant `structuredClone` (it deep-copied a tree that
+`mapTypesDeepStmt` rebuilds on the next line anyway) took NT1002 out of the frontier.
+`checker.ts`, `codegen.ts`, `ownership.ts`, `cli.ts`, `coverage.ts` and `driver.ts` then
+landed **together on one site** — `checker.ts:8300`, `for (const x of node)` over
+`unknown` in `daReads`.
+
+**The count in this document was an estimate; the measurement is 15**, and
+`test/walker-census.ts` keeps it honest:
+
+| module | reflective walkers |
+|---|---:|
+| `checker.ts` | 6 (`daReads`, `daUse`, `hasHostCall`, two renamer walks, one more) |
+| `codegen.ts` | 5 (`scanUsesActors`, `frameThrows`, `scanHasTry`, `mentions`, one more) |
+| `ownership.ts` | 4 (two `walk` closures, `isIdentNode`, `shadowedNames`) |
+| **total** | **15** |
+
+**They are reflective on purpose, and that reasoning has an answer.** `daReads`'s comment
+says a hand-written switch "would go stale, and a read missed HERE is a miscompile" — true
+of a switch *with a `default:` arm*. `walkExprChildren`/`walkStmtChildren` in `src/ast.ts`
+have none, so a missing case is a tsc error at the return type: the same guarantee, a
+different mechanism, and one this subset can compile.
+
+**Two things make it more than a mechanical rewrite**, and they are why it is not started
+here rather than an oversight:
+
+1. Those walkers are TRANSFORMERS — they rebuild every node. Using one purely to traverse
+   allocates a tree per visit, and `daUse` runs per statement in the definite-assignment
+   pass. A visit-only enumerator is probably wanted first.
+2. An accumulator cannot simply be captured. `Map.set` is PERSISTENT here and answers a new
+   map, so `out.set(k, v)` as a statement does NOTHING — the exact silent-wrong-answer
+   shape §A records. `daReads` is written that way today, which is fine only because it has
+   never run under nativets. Threading a return, or an `@@mutable` record field, is
+   required — and the record has to survive being captured by the walker's callbacks.
+
+### Where the twelve modules stand
+
+`ast.ts`, `lexer.ts`, `diagnostics.ts`, `coverage-preprocess.ts` build. `parser.ts` and
+`modules.ts` are clear through the checker AND the ownership pass and stop at NT1004 (the
+557-throw exception census — multi-frame propagation, sized above). The other six stop at
+the walkers. **Two walls, and clearing either reveals the other** — this file's recurring
+lesson, stated for the fifth time and not an exception this round either.
