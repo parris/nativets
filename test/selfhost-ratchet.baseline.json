@@ -1,7 +1,7 @@
 {
   "recordedAt": {
     "date": "2026-08-12",
-    "rev": "57d5db0"
+    "rev": "bf191e1"
   },
   "modules": {
     "ast.ts": {
@@ -152,7 +152,7 @@
       }
     },
     "parser.ts": {
-      "sha256": "287fd7d963819d41",
+      "sha256": "b2384f0237a7784b",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -160,8 +160,8 @@
       },
       "linked": {
         "stage": "ownership",
-        "code": "NT1605",
-        "message": "[NT1605] cannot move out of array element (its element type is linear)"
+        "code": "NT1601",
+        "message": "[NT1601] use of moved value: `call`"
       }
     }
   }

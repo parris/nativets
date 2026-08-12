@@ -131,7 +131,11 @@ const ASSERTED: Record<string, number> = {
   "codegen.ts": 5,
   "driver.ts": 1,
   "lexer.ts": 2,
-  "parser.ts": 2,
+  // 2 -> 1: `checkFloatingAsyncCalls` stopped reading `body[body.length - 1]!` at all. It
+  // bound that element and then a linear field out of it, which the ownership pass refuses
+  // twice over (NT1605) — so the entrypoint test was rewritten to walk `body` once instead,
+  // and the asserted read went with it. The ratchet only shrinks.
+  "parser.ts": 1,
 };
 
 export interface LengthIndexHit { line: number; asserted: boolean; inTemplate: boolean }
