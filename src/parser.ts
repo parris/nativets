@@ -2344,12 +2344,16 @@ class Parser {
    */
   private inheritFields(name: string, bases: { ty: Ty; spelling: string }[], own: Ty): Ty {
     if (bases.length === 0) return own;
+    // FLATTEN, THEN MERGE — one pass each, where this used to be a `put` arrow called from
+    // three places. A BOUND arrow that appends to a captured array is NT1607: it copies the
+    // array pointer into a heap env this scope cannot null, and may outlive the binding, so
+    // an in-place append could write freed storage. The refusal's hint is to write the
+    // accumulation as a plain loop in this frame, which is what both of these are.
+    //
+    // Flattening first is what keeps the override rule written ONCE rather than inlined at
+    // each of the three former call sites. Order is unchanged: bases in order, `own` last.
     //@@mutable
-    const fields: { key: string; ty: Ty }[] = [];
-    const put = (f: { key: string; ty: Ty }): void => {
-      const i = fields.findIndex((g) => g.key === f.key);
-      if (i < 0) fields.push(f); else fields[i] = { key: f.key, ty: f.ty }; // override, base slot
-    };
+    const all: { key: string; ty: Ty }[] = [];
     for (const b of bases) {
       // A base with no field list of its own is the case that must never be silently
       // accepted: dropping it is precisely the defect this function exists to end, and it
@@ -2362,9 +2366,20 @@ class Parser {
           `'interface ${name} extends ${b.spelling}' — '${b.spelling}' is not a plain record type whose fields are known in this file (it resolves to '${b.ty}')`,
         );
       }
-      for (const f of objectFields(b.ty)) put(f);
+      // COPIES, not the elements. `objectFields` hands back an array that owns its records,
+      // and a for-of binding borrows one — pushing it into another array would make a second
+      // owner (NT1604). `key` and `ty` are both strings, so the copy is exact.
+      for (const f of objectFields(b.ty)) all.push({ key: f.key, ty: f.ty });
     }
-    for (const f of objectFields(own)) put(f);
+    for (const f of objectFields(own)) all.push({ key: f.key, ty: f.ty });
+    //@@mutable
+    const fields: { key: string; ty: Ty }[] = [];
+    for (const f of all) {
+      const i = fields.findIndex((g) => g.key === f.key);
+      // A REDECLARED field takes the base's SLOT and the derived type — the whole point of
+      // merging rather than appending (see the header).
+      if (i < 0) fields.push({ key: f.key, ty: f.ty }); else fields[i] = { key: f.key, ty: f.ty };
+    }
     return objectType(fields);
   }
 
@@ -2506,8 +2521,11 @@ class Parser {
     if (this.at(";")) this.eat(";");
     // Exactly `type: "text"`, nothing more: an unrecognized attribute changes what the
     // import MEANS, so it is named back to the user rather than ignored.
-    const first = attrs[0]!;
-    if (attrs.length !== 1 || first.key !== "type" || first.value !== "text") {
+    // READ THROUGH the index — binding `const first = attrs[0]!` moves the record out of the
+    // array (NT1605). It also indexed before the length was tested, which was safe only
+    // because `parseImportAttributes` refuses an empty clause upstream (`with { }` is
+    // NT1017); short-circuit order means this no longer leans on that.
+    if (attrs.length !== 1 || attrs[0]!.key !== "type" || attrs[0]!.value !== "text") {
       const shown = attrs.map((a) => `${a.key}: "${a.value}"`).join(", ");
       throw nyi(NYI.MODULE, `the import attribute \`with { ${shown} }\` at ${kw.line}:${kw.col} (only \`type: "text"\` is implemented — it inlines the file as a compile-time string)`);
     }
@@ -2665,7 +2683,12 @@ class Parser {
       this.pendingDecorators = null;
       const d = this.parseVarDecl();
       if (this.at(";")) this.eat(";");
-      return this.applyVarAttrs(dec, d);
+      // `applyVarAttrs` STAMPS `d` and returns nothing. Handing the parameter back out was
+      // NT1604 — a parameter is a borrow, and the caller (here) still owns the value — so
+      // ownership never leaves this frame now. It already had to mutate `d` in place for
+      // the stamp, so returning it was redundant as well as unowned.
+      this.applyVarAttrs(dec, d);
+      return d;
     }
     const t = this.peek();
     throw decoratorError(
@@ -2694,8 +2717,8 @@ class Parser {
     // structural. See `eatTypeClose` for why the type-level attribute is not the answer.
     //@@mutable
     d: VarDecl,
-  ): VarDecl {
-    if (!dec || (!dec.attrs.length && !dec.wrappers.length)) return d;
+  ): void {
+    if (!dec || (!dec.attrs.length && !dec.wrappers.length)) return;
     if (dec.wrappers.length) {
       throw decoratorError(
         `runtime decorator '@${dec.wrappers[0]}' on a variable declaration`,
@@ -2716,7 +2739,6 @@ class Parser {
       );
     }
     d.mutable = true;
-    return d;
   }
 
   // ---- statements ----
@@ -2917,7 +2939,12 @@ class Parser {
   /** Take (and clear) the pattern-parameter prelude. Called right after a parameter
    *  list is parsed, before the body — so a nested arrow's prelude never mixes in. */
   private takeParamPrelude(): Stmt[] {
-    const p = this.paramPrelude;
+    // A SPREAD, then reset. `const p = this.paramPrelude` names the value `this` owns, so
+    // returning it is NT1604 — the take-and-replace idiom is invisible to the ownership
+    // pass, which sees the read and the store as unrelated. Spreading moves the statements
+    // into an array this frame owns and hands THAT out; the field is emptied on the next
+    // line exactly as before, so no handle to the old storage survives either way.
+    const p = [...this.paramPrelude];
     this.paramPrelude = [];
     return p;
   }
@@ -3026,11 +3053,24 @@ class Parser {
     // in scope for the whole signature + body, so annotations mentioning them resolve to
     // `#T` markers and the checker can monomorphize per call site.
     const typeParams = this.at("<") ? this.parseTypeParamList() : [];
-    if (typeParams.length) this.typeParamScopes.push(typeParams);
+    // A COPY onto the scope stack. The names are wanted in TWO places with different
+    // lifetimes — the stack, for as long as the signature and body are being parsed, and
+    // the `FuncDecl` this returns — so pushing the array itself moved it and the node built
+    // below then read a moved value (NT1601). They are strings; the copy is exact.
+    // ASKED ONCE, BEFORE THE MOVE. `typeParams` ends up inside the `FuncDecl` this returns,
+    // and the `finally` below runs AFTER that — so `typeParams.length` there reads a binding
+    // whose value the node now owns (NT1601). It is a real hazard, not a false positive, and
+    // a bool costs nothing.
+    const hasTypeParams = typeParams.length > 0;
+    if (hasTypeParams) this.typeParamScopes.push([...typeParams]);
     try {
       const params = this.parseParamList();
       if (this.lastPromiseParams.length) this.promiseParamsByFn = this.promiseParamsByFn.set(name, this.lastPromiseParams);
-      const promiseNames = this.lastPromiseParamNames;
+      // A COPY. `this.lastPromiseParamNames` is a scratch field the NEXT parameter list
+      // overwrites, and `asyncParamScopes` keeps its entry for the whole body — aliasing
+      // the field into the stack would give two owners of one array (NT1604). The elements
+      // are strings, so the copy is exact and shallow.
+      const promiseNames = [...this.lastPromiseParamNames];
       const prelude = this.takeParamPrelude(); // binding patterns → `const` decls at the top
       let returnAnnot: Ty | undefined;
       let retAsyncFn = false;
@@ -3048,11 +3088,17 @@ class Parser {
       let body: Stmt[];
       try { body = [...prelude, ...this.parseBlock()]; }
       finally { this.returnsAsyncFnStack.pop(); this.asyncParamScopes.pop(); }
-      return typeParams.length
-        ? { kind: "FuncDecl", name, params, returnAnnot, body, typeParams }
-        : { kind: "FuncDecl", name, params, returnAnnot, body };
+      // `if`/`return`, not a `?:`. BOTH arms of the ternary consume `params`, and a ternary
+      // arm in a consuming position MOVES (docs/divergences.md) — so the pass counted two
+      // moves of one value and reported NT1601, though only one arm can ever run. Two
+      // returns put the same two literals on paths the analysis can see are exclusive.
+      if (hasTypeParams) {
+        return { kind: "FuncDecl", name, params, returnAnnot, body, typeParams };
+      } else {
+        return { kind: "FuncDecl", name, params, returnAnnot, body };
+      }
     } finally {
-      if (typeParams.length) this.typeParamScopes.pop();
+      if (hasTypeParams) this.typeParamScopes.pop();
     }
   }
 
@@ -3200,20 +3246,27 @@ class Parser {
       // which is what generic functions already do — the type argument comes from the
       // argument at each call site, not from the bound.
       const memberTypeParams = this.at("<") ? this.parseTypeParamList() : [];
-      if (memberTypeParams.length) this.typeParamScopes.push(memberTypeParams);
+      // Same two adjustments as `parseFunction`: the scope stack takes a COPY, and every
+      // later test asks the BOOL. The names end up inside the `methods` entry at the bottom,
+      // and the `finally` that pops the scope runs after that — reading `.length` there is a
+      // read of a moved value (NT1601), which is the hazard, not a nuisance.
+      const hasMemberTypeParams = memberTypeParams.length > 0;
+      if (hasMemberTypeParams) this.typeParamScopes.push([...memberTypeParams]);
       try {
       if (member === "constructor" && this.at("(") && !isStatic) {
         // TS forbids type parameters on a constructor (only `class C<T>` carries them),
         // so this is a syntax error rather than a deferred feature.
-        if (memberTypeParams.length) throw parseError(`Type parameters on a constructor at ${tok.line}:${tok.col} — put them on the class (\`class ${name}<T>\`)`);
+        if (hasMemberTypeParams) throw parseError(`Type parameters on a constructor at ${tok.line}:${tok.col} — put them on the class (\`class ${name}<T>\`)`);
         if (ctorParams) throw parseError(`Duplicate constructor at ${tok.line}:${tok.col}`);
         const ctorPs = this.parseParamList(true); // ctor: access-modified params → parameter properties
+        // CHECKED BEFORE THE HANDOFF. Iterated through the CALL RESULT, which is a plain
+        // `Param[]`: reading `ctorParams` (declared `Param[] | undefined`) is NT1011 even
+        // right after the assignment, because the narrowing does not survive to a separate
+        // statement through a mutable binding. But `ctorParams = ctorPs` MOVES, so the scan
+        // has to happen while this frame still owns the list — one line earlier than it did.
+        for (const p of ctorPs) if (p.rest) throw nyi(NYI.CLASS_FEATURE, "rest parameter in a constructor");
         ctorParams = ctorPs;
         const patternPrelude = this.takeParamPrelude(); // binding patterns → `const` decls at the top
-        // Iterated through the CALL RESULT, which is a plain `Param[]`. Reading `ctorParams`
-        // (declared `Param[] | undefined`) is NT1011 even right after the assignment: the
-        // narrowing does not survive to a separate statement through a mutable binding.
-        for (const p of ctorPs) if (p.rest) throw nyi(NYI.CLASS_FEATURE, "rest parameter in a constructor");
         if (this.at(":")) { this.eat(":"); this.parseType(); } // ctor return annot (ignored)
         this.thisWritable = true; this.inErrorCtor = extendsError; this.inCtorBody = true;
         ctorBody = [...patternPrelude, ...this.parseBlock()];
@@ -3237,21 +3290,27 @@ class Parser {
           // through a different call path (`C.m(…)`, no instance), so it is REFUSED rather
           // than half-supported — an unresolved `#T` reaching codegen is the failure mode
           // monomorphization exists to prevent.
-          if (memberTypeParams.length) throw nyi(NYI.GENERIC, `generic STATIC method '${name}.${member}' at ${tok.line}:${tok.col} (a generic INSTANCE method is supported)`);
+          if (hasMemberTypeParams) throw nyi(NYI.GENERIC, `generic STATIC method '${name}.${member}' at ${tok.line}:${tok.col} (a generic INSTANCE method is supported)`);
           statics.push({ name: member, params, returnAnnot, body: [...prelude, ...this.parseBlock()] });
           continue;
+        } else {
+          // AN EXPLICIT `else`, though the branch above ends in `continue`. Both pushes
+          // consume `params`, and the ownership pass does not treat `continue` (or `return`)
+          // as ending the path — it saw two moves of one value and reported NT1601. Written
+          // as two branches, the exclusivity is something the analysis can see.
+          //
+          // A METHOD may assign `this.f` too. Whether it does is the whole distinction
+          // between a plain method and a SETTER (docs/decorators.md), so record it.
+          this.thisWritable = true; this.thisAssigned = false;
+          const body = [...prelude, ...this.parseBlock()];
+          const setter = this.thisAssigned;
+          this.thisWritable = false; this.thisAssigned = false;
+          methods.push({ name: member, params, returnAnnot, body, setter, wrappers: memberWrappers, typeParams: hasMemberTypeParams ? memberTypeParams : undefined });
+          continue;
         }
-        // A METHOD may assign `this.f` too. Whether it does is the whole distinction
-        // between a plain method and a SETTER (docs/decorators.md), so record it.
-        this.thisWritable = true; this.thisAssigned = false;
-        const body = [...prelude, ...this.parseBlock()];
-        const setter = this.thisAssigned;
-        this.thisWritable = false; this.thisAssigned = false;
-        methods.push({ name: member, params, returnAnnot, body, setter, wrappers: memberWrappers, typeParams: memberTypeParams.length ? memberTypeParams : undefined });
-        continue;
       }
       // Past this point the member is a FIELD, which cannot carry type parameters.
-      if (memberTypeParams.length) throw parseError(`Type parameters on class field '${member}' at ${tok.line}:${tok.col}`);
+      if (hasMemberTypeParams) throw parseError(`Type parameters on class field '${member}' at ${tok.line}:${tok.col}`);
       // field declaration: `name: Type;` / `name = init;` / `name: Type = init;` (optional `?`).
       // A field type comes from its annotation if present, else is inferred from the initializer
       // (`inferFieldTy`). An initializer is desugared into `this.name = init` prepended to the
@@ -3312,7 +3371,7 @@ class Parser {
       } finally {
         // `finally` also runs on the `continue`s above, so the scope is popped on every
         // path out of a member — matching `parseFunction`'s handling for a generic fn.
-        if (memberTypeParams.length) this.typeParamScopes.pop();
+        if (hasMemberTypeParams) this.typeParamScopes.pop();
       }
     }
     this.eat("}");
@@ -4604,7 +4663,14 @@ class Parser {
           this.eat(":");
           if (key === "__proto__") throw nyi(NYI.PROTO_KEY, "`__proto__` as an object-literal key", undefined, { line: kt.line, col: kt.col });
           properties.push({ key, value: this.parseAssign() });
-        } else properties.push({ key, value: { kind: "Identifier", name: key } }); // shorthand
+        } else {
+          // The shorthand's synthesized `Identifier` CARRIES THE KEY'S POSITION. Without it
+          // every ownership refusal reported through a shorthand came out unlocated —
+          // `error[NT1601]: use of moved value: \`params\`` and nothing else, because
+          // `report` falls back to line 0 and the renderer drops the span. `{ a, b }` is the
+          // ordinary way to build a node out of locals, so this is where moves get reported.
+          properties.push({ key, value: { kind: "Identifier", name: key, loc: { line: kt.line, col: kt.col, file: this.file } } }); // shorthand
+        }
       } while (this.at(",") && (this.eat(","), true));
     }
     this.eat("}");
