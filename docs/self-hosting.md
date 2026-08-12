@@ -5605,3 +5605,44 @@ uncaught host failures and for the single-frame propagation `scanEscaping` prove
 converts 148 frames of source churn into one lowering change. Everything else in this
 document is downstream of it — `checker.ts` and `parser.ts` are the two largest modules and
 both are gated on it.
+
+
+### What multi-frame propagation actually costs — read the code, not the note
+
+The one-frame limit is **one line** of `scanEscaping` (`src/codegen.ts`):
+
+```ts
+// Uncovered: in `main` that IS node's uncaught exception … Anywhere else it would have to
+// propagate a SECOND frame, which is the case this lane does not implement.
+if (callCov[c]! === "") { if (callWhere[c]! !== "main") dead[i] = true; continue; }
+```
+
+Generalising it needs three things, and only the first is cheap:
+
+1. **A FIXPOINT instead of a single pass.** An uncovered call site in frame `G` is fine if
+   `G` is itself propagating. Today `callWhere` records only `main` / `frame` / `arrow`; it
+   would have to record *which* frame, and the judge would iterate to a fixpoint instead of
+   deciding each seed once. The note's "the escapes set never grows transitively" is exactly
+   what stops being true.
+2. **The seed set has to GROW.** A frame that merely *forwards* someone else's raise has no
+   `throw` of its own, so `frameThrows` never nominates it — but it must become a
+   propagator, and rule 3 (every covering `catch` binds ONE carriable type) must then hold
+   along the whole chain, not just at one hop.
+3. **THE PART THAT IS NOT LOCAL TO CODEGEN — a drop set per propagating call site.**
+   `genPropagate` leaves a frame by an ordinary `ret`, and its whole cost is freeing exactly
+   what a `return` written at that point would free. It gets that from `ThrowStmt.drops`,
+   which **the ownership pass annotates**. An intermediate frame propagates at a *call*, and
+   a `CallExpr` carries no such annotation — so ownership would have to compute
+   `ownedInScope` at every call site that might forward a raise, and stamp it.
+
+That third item is why this is a cross-pass feature rather than a codegen tweak, and it is
+the one a design sketch would miss: `emitExcCheck`'s handler-less arm renders the *uncaught*
+path (stderr, exit 1), and the new third arm — "no handler here, but this frame may
+forward" — has nothing to free by unless ownership supplies it. Getting that wrong does not
+crash: the frame returns a zeroed default with the flag still set, which is the silent wrong
+answer the existing refusal exists to prevent.
+
+**Not started.** It is the right next lane and it is a real one — a fixpoint in
+`scanEscaping`, a new `ThrowStmt.drops`-shaped annotation on call sites from `ownership.ts`,
+and a third arm in `emitExcCheck`. Beginning it and leaving it half-wired would produce
+exactly the failure mode the current refusal is protecting.
