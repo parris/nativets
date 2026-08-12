@@ -32,7 +32,7 @@ import { parse } from "./parser.ts";
 import { moduleError, mutationError } from "./diagnostics.ts";
 import { resolveStaticFieldReads, walkExprChildren, walkStmtChildren } from "./ast.ts";
 import type {
-  Program, Stmt, Expr, Ty, Declarator, Param, VarDecl, ImportDecl, RecTypeEntry,
+  Program, Stmt, Expr, Ty, Declarator, Param, VarDecl, ImportDecl, RecTypeEntry, Loc,
 } from "./ast.ts";
 
 /** How the linker reads a module. Injectable so tests can link in-memory graphs. */
@@ -332,6 +332,16 @@ class Renamer {
  * `catch` parameter all count. Function bodies are NOT walked: each has its own
  * frame, so its locals cannot collide across modules.
  */
+//@@mutable
+/**
+ * A string set a CLOSURE has to update — a record, because a write to a captured binding
+ * is NT1031 while a field of an `@@mutable` record is not one (the binding never changes,
+ * the object does). Used twice: `moduleOrder`'s DFS visited set, and `linkProgram`'s scan
+ * for lowered static fields. The field is named `done` for the first; the second reads a
+ * little oddly and sharing one declaration beats a second identical interface.
+ */
+interface VisitSeen { done: Set<string> }
+
 function topLevelNames(p: Program): string[] {
   //@@mutable
   const out: string[] = [];
@@ -434,10 +444,27 @@ function moduleOrder(
   //@@mutable
   deps: Map<string, ImportDecl[]> = new Map(),
 ): string[] {
+  // ACCUMULATORS, so `.push`/`.pop` are the in-place operations the array opt-in
+  // legalizes (NT1606 otherwise). `order` is the post-order result and the other two are
+  // the DFS stack — a stack is the one shape the immutable spelling cannot express
+  // cheaply, since `xs = [...xs, v]` on the way down and `xs = xs.slice(0, -1)` on the way
+  // back up is two O(n) copies per edge.
+  //@@mutable
   const order: string[] = [];
-  let done = new Set<string>();   // rebound: a nativets Set is PERSISTENT
+  // A FIELD OF AN `@@mutable` RECORD, not a `let`. `visit` is a closure and closures
+  // capture by VALUE here, so `done = done.add(p)` inside it updates the closure's own
+  // copy and the outer binding never sees it — NT1031. Mutating a field of an `@@mutable`
+  // record is not a capture write: the binding never changes, the object does. Same shape
+  // `src/lexer.ts`'s `LexState` uses for the cursor, and for the same reason.
+  //
+  // The `.add` is still a REBIND of the field: a nativets `Set` is PERSISTENT and answers
+  // a new set, where bun's mutating `Set.add` would make the discarded spelling look right
+  // (docs/divergences.md §A).
+  const seen: VisitSeen = { done: new Set<string>() };
+  //@@mutable
   const stack: string[] = [];
   /** Aligned with `stack`: was the edge that reached `stack[i]` an `import type`? */
+  //@@mutable
   const edges: boolean[] = [];
 
   const load = (path: string, importer: string | null, line: number): string => {
@@ -456,7 +483,7 @@ function moduleOrder(
   };
 
   const visit = (path: string, importer: string | null, line: number, typeOnly: boolean): void => {
-    if (done.has(path)) return;
+    if (seen.done.has(path)) return;
     const at = stack.indexOf(path);
     if (at >= 0) {
       // The chain, with each module's INCOMING edge marked when it is `import type`.
@@ -501,7 +528,7 @@ function moduleOrder(
       imp.specs.length > 0 && imp.specs.every((s) => s.typeOnly === true));
     stack.pop();
     edges.pop();
-    done = done.add(path);
+    seen.done = seen.done.add(path);
     order.push(path);
   };
 
@@ -707,9 +734,24 @@ export function linkProgram(entrySource: string, entryPath?: string, read: ReadM
     // 4. Publish this module's export table under the final names.
     let finalExports = new Map<string, string>();
     let finalTypes = new Map<string, Ty>();
-    let asyncExports = new Set<string>(program.exports?.asyncValues ?? []);
-    for (const [exported, local] of program.exports?.values ?? []) finalExports = finalExports.set(exported, names.get(local) ?? local);
-    for (const [exported, ref] of program.exports?.reexports ?? []) {
+    // BUILT, not seeded from `?? []`. The fallback arm is an empty ARRAY literal with no
+    // context to give it an element type (NT1001) — and `asyncValues` is a `Set<string>`
+    // anyway, so annotating a `string[]` seed was the wrong shape as well as the wrong
+    // context. Adding the members explicitly needs neither.
+    //
+    // `asyncExports = asyncExports.add(v)`, rebound: a nativets `Set` is PERSISTENT and
+    // `.add` answers a new one, where bun's mutating `Set.add` would make the discarded
+    // spelling look correct (docs/divergences.md §A).
+    let asyncExports = new Set<string>();
+    // ONE GUARD, not four `?? []` fallbacks. Each fallback is an empty ARRAY literal with
+    // no context to give it an element type (NT1001), and three of the four are standing in
+    // for a Map, not an array — so the fallback was the wrong SHAPE as well as untypeable.
+    // A module with no `export` clause has nothing to merge, which is what the guard says.
+    const exps = program.exports;
+    if (exps !== undefined) {
+    for (const v of exps.asyncValues) asyncExports = asyncExports.add(v);
+    for (const [exported, local] of exps.values) finalExports = finalExports.set(exported, names.get(local) ?? local);
+    for (const [exported, ref] of exps.reexports) {
       const dep = mods.get(resolveSpecifier(path, ref.source))!;
       const target = dep.finalExports.get(ref.imported);
       if (target === undefined) {
@@ -726,12 +768,15 @@ export function linkProgram(entrySource: string, entryPath?: string, read: ReadM
     // here is a reference that resolves — if at all — against the IMPORTER's names: exactly
     // the "one module's nodes with the other's layout" hazard `recTypes` is renamed to
     // prevent, arriving by the other door.
-    for (const [exported, ty] of program.exports?.types ?? []) {
+    for (const [exported, ty] of exps.types) {
       finalTypes = finalTypes.set(exported, rewriteTy(ty, tags, refRenames));
     }
+    } // end `exps !== undefined` — see the guard above
 
     mods = mods.set(path, { path, source, program: renamed, finalExports, finalTypes, asyncExports });
-    body.push(...renamed.body);
+    // A BULK MOVE, not `push(...)`: a spread into a variadic/method call is NT1006, and
+    // `body` is a `let`, so reassigning says the same thing. Same order.
+    body = [...body, ...renamed.body];
   });
 
   // A STATIC field lowers to a module-level `const C.f`, and a read of one is rewritten to
@@ -739,16 +784,23 @@ export function linkProgram(entrySource: string, entryPath?: string, read: ReadM
   // ANOTHER module is still a `C.f` member expression here. Finish the job over the merged
   // body, where every static field is visible under its FINAL (mangled) name: a dotted
   // binding name is one, and nothing else can produce one (no source identifier has a `.`).
-  let staticFields = new Set<string>();   // rebound: a nativets Set is PERSISTENT
+  // A RECORD FIELD again, for the reason `seen` above is one: `scanStatics` is a closure
+  // and a write to a captured binding is NT1031, while a field of an `@@mutable` record is
+  // not a capture write — the binding never changes, the object does. Still a REBIND of
+  // the field, because a nativets `Set` is persistent (docs/divergences.md §A).
+  const sf: VisitSeen = { done: new Set<string>() };
   const scanStatics = (list: Stmt[]): void => {
     for (const s of list) {
-      if (s.kind === "VarDecl") { for (const d of s.decls) if (d.name.includes(".")) staticFields = staticFields.add(d.name); }
+      if (s.kind === "VarDecl") { for (const d of s.decls) if (d.name.includes(".")) sf.done = sf.done.add(d.name); }
       else if (s.kind === "MultiStmt") scanStatics(s.stmts); // a class lowers to one of these
     }
   };
   scanStatics(body);
-  if (staticFields.size) {
-    body = resolveStaticFieldReads(body, staticFields, (n, at) => {
+  if (sf.done.size) {
+    // The callback's parameters are ANNOTATED. `onAssign` is an OPTIONAL parameter
+    // (`onAssign?: (name, at) => never`), and an optional's declared type is not a context
+    // that reaches an inline arrow here — `cannot infer type of arrow parameter 'n'`.
+    body = resolveStaticFieldReads(body, sf.done, (n: string, at: Loc | undefined) => {
       throw mutationError(`assignment to the static field '${n}'`,
         "a static field is module-level storage initialized once where the class is declared — it is a `const`, so give the class a static METHOD that returns the value you want instead; for state that CHANGES (`C.f++`, `C.f += 1`), use a module-level `let`, or a field of a `@@mutable` class instance",
         at);
