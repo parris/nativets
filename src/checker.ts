@@ -8296,27 +8296,177 @@ type DATracked = Map<string, Ty | "unknown">;
  * and wrong for `x += v` and `x++`, which read `x` before writing it — hence the
  * explicit cases.
  */
-function daReads(node: unknown, out: Map<string, Loc | undefined>): void {
-  if (Array.isArray(node)) { for (const x of node) daReads(x, out); return; }
-  if (node === null || typeof node !== "object") return;
-  const n = node as { kind?: string; name?: unknown; op?: unknown; target?: unknown; loc?: Loc };
-  if (n.kind === "Identifier" && typeof n.name === "string") {
-    if (!out.has(n.name)) out.set(n.name, n.loc);
-    return;
+/*
+ * THE TYPED READ SCAN — `daReads`'s replacement, and the reason it is written out.
+ *
+ * The reflective version below walks `Object.values(node)` over an `unknown`, which this
+ * subset cannot compile (`for (const x of node)` over `unknown` is NT1011) and which was
+ * the single shared blocker of SIX modules. Its comment defended the reflection: a
+ * hand-written switch "would go stale, and a read missed HERE is a miscompile". That is
+ * true of a switch with a `default:` arm. These have NONE, and they return the map rather
+ * than `void`, so a missing case is TS2366 at the function's declared return type — the
+ * same guarantee `walkExprChildren` already relies on, by the same mechanism.
+ *
+ * THE MAP IS THREADED, not captured. `Map.set` is PERSISTENT here and answers a NEW map,
+ * so `out.set(k, v)` as a statement does nothing under nativets while working under bun —
+ * the silent-wrong-answer shape docs/divergences.md §A records, and exactly what the
+ * reflective version below does. Returning it is correct under both.
+ *
+ * Each arm mirrors `walkExprChildren`/`walkStmtChildren` child for child. That is the part
+ * a reviewer cannot check by eye, so it is checked by machine instead:
+ * test/da-reads-typed.test.ts runs both walkers over every fixture in the corpus and
+ * asserts they find the SAME reads, with the reflective one kept as the oracle.
+ */
+function daRecord(out: Map<string, Loc | undefined>, name: string, loc: Loc | undefined): Map<string, Loc | undefined> {
+  return out.has(name) ? out : out.set(name, loc);
+}
+
+function daReadsExprs(xs: Expr[], out: Map<string, Loc | undefined>): Map<string, Loc | undefined> {
+  let m = out;
+  for (const x of xs) m = daReadsExpr(x, m);
+  return m;
+}
+
+function daReadsStmts(xs: Stmt[], out: Map<string, Loc | undefined>): Map<string, Loc | undefined> {
+  let m = out;
+  for (const x of xs) m = daReadsStmt(x, m);
+  return m;
+}
+
+function daReadsExpr(e: Expr, out: Map<string, Loc | undefined>): Map<string, Loc | undefined> {
+  switch (e.kind) {
+    // Leaves. One arm each, matching `walkExprChildren` — a shared fallthrough label would
+    // not narrow `e`, and these are spelled the same way there for the same reason.
+    case "NumberLiteral": return out;
+    case "BooleanLiteral": return out;
+    case "StringLiteral": return out;
+    case "UndefinedLiteral": return out;
+    case "NullLiteral": return out;
+    case "Identifier": return daRecord(out, e.name, e.loc);
+    case "TemplateLiteral": return daReadsExprs(e.exprs, out);
+    case "ArrayLiteral": return daReadsExprs(e.elements, out);
+    case "ObjectLiteral": {
+      let m = out;
+      for (const p of e.properties) m = daReadsExpr(p.value, m);
+      return m;
+    }
+    case "SpreadExpr": return daReadsExpr(e.argument, out);
+    case "MemberExpr": return daReadsExpr(e.object, out);
+    case "IndexExpr": return daReadsExpr(e.index, daReadsExpr(e.object, out));
+    case "UnaryExpr": return daReadsExpr(e.operand, out);
+    case "TypeofExpr": return daReadsExpr(e.operand, out);
+    // `x++` READS `x` before writing it, which is why the two write-only forms are named
+    // here at all: they carry their target as a bare string, so the node walk cannot see
+    // it as a read. `targetExpr` set means the target is an expression (`o.f++`) and
+    // `target` is `""` — recorded anyway, exactly as the reflective walker does, and
+    // harmless because `""` is never a tracked binding.
+    case "UpdateExpr": {
+      // `undefined`, not `e.loc`: `UpdateExpr` HAS no `loc` field (tsc says so), and the
+      // reflective walker read it off a cast shape where it was simply absent. Same value,
+      // now stated rather than inferred from a `?:` on a field that does not exist.
+      const m = daRecord(out, e.target, undefined);
+      return e.targetExpr === undefined ? m : daReadsExpr(e.targetExpr, m);
+    }
+    case "BinaryExpr": return daReadsExpr(e.right, daReadsExpr(e.left, out));
+    case "LogicalExpr": return daReadsExpr(e.right, daReadsExpr(e.left, out));
+    case "SequenceExpr": return daReadsExprs(e.exprs, out);
+    case "ConditionalExpr": return daReadsExpr(e.alternate, daReadsExpr(e.consequent, daReadsExpr(e.test, out)));
+    // `x = v` writes and does not read; `x += v` does both.
+    case "AssignExpr": {
+      const m = e.op === "=" ? out : daRecord(out, e.target, e.loc);
+      return daReadsExpr(e.value, m);
+    }
+    case "IndexAssign": return daReadsExpr(e.value, daReadsExpr(e.index, daReadsExpr(e.object, out)));
+    case "FieldAssign": return daReadsExpr(e.value, daReadsExpr(e.object, out));
+    case "InstanceOfExpr": return daReadsExpr(e.object, out);
+    case "InExpr": return daReadsExpr(e.object, daReadsExpr(e.key, out));
+    case "AsExpr": return daReadsExpr(e.expr, out);
+    case "SatisfiesExpr": return daReadsExpr(e.expr, out);
+    case "NonNullExpr": return daReadsExpr(e.expr, out);
+    case "NewExpr": return daReadsExprs(e.args, out);
+    case "CallExpr": return daReadsExprs(e.args, daReadsExpr(e.callee, out));
+    case "ArrowFunction": {
+      // A read inside an arrow body IS a read of the enclosing binding, so the body is
+      // walked — and so are the parameter DEFAULTS, which the reflective walker reaches
+      // through `Object.values` on each `Param`. Exactly one of `body`/`stmts` is set.
+      let m = out;
+      for (const p of e.params) if (p.default !== undefined) m = daReadsExpr(p.default, m);
+      if (e.body !== undefined) m = daReadsExpr(e.body, m);
+      if (e.stmts !== undefined) m = daReadsStmts(e.stmts, m);
+      return m;
+    }
   }
-  if (typeof n.target === "string" &&
-      (n.kind === "UpdateExpr" || (n.kind === "AssignExpr" && n.op !== "="))) {
-    if (!out.has(n.target)) out.set(n.target, n.loc);
+}
+
+function daReadsStmt(s: Stmt, out: Map<string, Loc | undefined>): Map<string, Loc | undefined> {
+  switch (s.kind) {
+    case "VarDecl": {
+      let m = out;
+      for (const d of s.decls) if (d.init !== undefined) m = daReadsExpr(d.init, m);
+      return m;
+    }
+    case "FuncDecl": {
+      let m = out;
+      for (const p of s.params) if (p.default !== undefined) m = daReadsExpr(p.default, m);
+      return daReadsStmts(s.body, m);
+    }
+    case "ReturnStmt": return s.argument === null ? out : daReadsExpr(s.argument, out);
+    case "IfStmt": {
+      const m = daReadsStmts(s.consequent, daReadsExpr(s.test, out));
+      return s.alternate === null ? m : daReadsStmts(s.alternate, m);
+    }
+    case "WhileStmt": return daReadsStmts(s.body, daReadsExpr(s.test, out));
+    case "DoWhileStmt": return daReadsExpr(s.test, daReadsStmts(s.body, out));
+    case "ForStmt": {
+      let m = out;
+      if (s.init !== null) m = s.init.kind === "VarDecl" ? daReadsStmt(s.init, m) : daReadsExpr(s.init, m);
+      if (s.test !== null) m = daReadsExpr(s.test, m);
+      if (s.update !== null) m = daReadsExpr(s.update, m);
+      return daReadsStmts(s.body, m);
+    }
+    case "ForOfStmt": return daReadsStmts(s.body, daReadsExpr(s.iterable, out));
+    case "ForInStmt": return daReadsStmts(s.body, daReadsExpr(s.object, out));
+    case "SwitchStmt": {
+      let m = daReadsExpr(s.discriminant, out);
+      for (const c of s.cases) {
+        if (c.test !== null) m = daReadsExpr(c.test, m);
+        m = daReadsStmts(c.body, m);
+      }
+      return m;
+    }
+    case "ThrowStmt": return daReadsExpr(s.argument, out);
+    case "TryStmt": {
+      let m = daReadsStmts(s.block, out);
+      if (s.handler !== null) m = daReadsStmts(s.handler, m);
+      if (s.finalizer !== null) m = daReadsStmts(s.finalizer, m);
+      return m;
+    }
+    case "ExprStmt": return daReadsExpr(s.expr, out);
+    case "BlockStmt": return daReadsStmts(s.body, out);
+    case "MultiStmt": return daReadsStmts(s.stmts, out);
+    case "BreakStmt": return out;
+    case "ContinueStmt": return out;
+    case "BlockDrops": return out;
   }
-  for (const v of Object.values(node)) daReads(v, out);
+}
+
+
+/* TEST SEAM. The typed walker over one STATEMENT, so test/da-reads-typed.test.ts can hold
+ * it against the reflective walker it replaced — which now lives IN that test, since `test/`
+ * is outside the self-hosting surface and `src/` is not. An equivalence claim nobody can
+ * run is not one, and the oracle is the thing being replaced. */
+export function daReadsTypedForTest(s: Stmt): Map<string, Loc | undefined> {
+  return daReadsStmt(s, new Map<string, Loc | undefined>());
 }
 
 /** Refuse every read in `e` of a tracked binding not yet proven assigned. */
-function daUse(e: unknown, tracked: DATracked | null, flow: DAFlow): void {
+function daUse(e: Expr | null | undefined, tracked: DATracked | null, flow: DAFlow): void {
   if (tracked === null) return; // shape-only mode: nothing is tracked, so nothing to refuse
   if (e === null || e === undefined) return;
-  const reads = new Map<string, Loc | undefined>();
-  daReads(e, reads);
+  // TYPED, and the map is THREADED rather than filled in place — see `daReadsExpr`. The
+  // parameter is an `Expr` now too: every call site already passed one (or a `null` the
+  // guard above takes), so `unknown` was buying nothing but the reflection it forced.
+  const reads = daReadsExpr(e, new Map<string, Loc | undefined>());
   for (const [name, loc] of reads) {
     const ty = tracked.get(name);
     if (ty === undefined || flow.has(name)) continue;
