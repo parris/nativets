@@ -2641,8 +2641,16 @@ class FnGen {
           // return the default. `scanEscaping` has already established that every call
           // site checks the flag, so the default value is never read.
           if (this.canEscape && this.genPropagate(s)) return;
-          throw nyi(NYI.EXCEPTION, `\`throw\`${where(s)} that is not inside a \`try\` in the same function`,
-            "a throw is lowered as a branch to its enclosing `try`, so it must sit inside one IN THE SAME function — or else cross exactly ONE frame, which needs EVERY call site of this function to sit inside a `try`/`catch` in its immediate caller (a call from module top level counts, since nothing above it could catch). Put every call in a `try`/`catch`, wrap the throwing code in a local `try`/`catch`, or return a result value (e.g. `T | undefined`) and check it at the call site");
+          // THE LOC IS PASSED, not merely spelled into the message by `where`. Without it the
+          // refusal has no span, and a span-less diagnostic renders against the ENTRY
+          // module — so this reported `228:5` while compiling `src/parser.ts` for a `throw`
+          // that is in `src/lexer.ts`, at a line that is an `if` in the entry. `s.file` is
+          // what puts the underline in the right file.
+          // No `where(s)` in the TEXT any more: the span prints the position, so spelling it
+          // into the message too gave `\`throw\` at 228:5 … is not supported yet at 228:5`.
+          throw nyi(NYI.EXCEPTION, "`throw` that is not inside a `try` in the same function",
+            "a throw is lowered as a branch to its enclosing `try`, so it must sit inside one IN THE SAME function — or else cross exactly ONE frame, which needs EVERY call site of this function to sit inside a `try`/`catch` in its immediate caller (a call from module top level counts, since nothing above it could catch). Put every call in a `try`/`catch`, wrap the throwing code in a local `try`/`catch`, or return a result value (e.g. `T | undefined`) and check it at the call site",
+            s.line === undefined ? undefined : { line: s.line, col: s.col ?? 0, file: s.file });
         }
         const v = this.genExpr(s.argument);
         // The store used to be RAW, under `h.eType` whatever the value actually was — and

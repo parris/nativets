@@ -1726,7 +1726,13 @@ export interface SwitchStmt { kind: "SwitchStmt"; discriminant: Expr; cases: Swi
  *  would free — the same `ownedInScope` set, computed at the same program point. Unset
  *  for a throw that stays in-frame (a branch to a local catch, which reaches the block's
  *  own drop points normally). */
-export interface ThrowStmt { kind: "ThrowStmt"; argument: Expr; line?: number; col?: number; drops?: string[]; }
+/**
+ * `file` is carried alongside `line`/`col` for the reason `Loc` carries it: a fileless
+ * span renders against the ENTRY source, so in a multi-module build NT1004 named the wrong
+ * file's line 228 and sent the reader to a statement that is not even a `throw`. Same
+ * defect the parser's `prevLoc` was fixed for.
+ */
+export interface ThrowStmt { kind: "ThrowStmt"; argument: Expr; line?: number; col?: number; file?: string; drops?: string[]; }
 export interface TryStmt { kind: "TryStmt"; block: Stmt[]; param: string | null; handler: Stmt[] | null; finalizer: Stmt[] | null; catchTy?: Ty; }
 export interface ExprStmt { kind: "ExprStmt"; expr: Expr; }
 export interface BlockStmt { kind: "BlockStmt"; body: Stmt[]; }

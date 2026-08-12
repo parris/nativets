@@ -2792,7 +2792,7 @@ class Parser {
     if (this.at("do")) return this.parseDoWhile();
     if (this.at("for")) return this.parseFor();
     if (this.at("switch")) return this.parseSwitch();
-    if (this.at("throw")) { const t = this.peek(); this.eat("throw"); const a = this.parseExpression(); this.eat(";"); return { kind: "ThrowStmt", argument: a, line: t.line, col: t.col }; }
+    if (this.at("throw")) { const t = this.peek(); this.eat("throw"); const a = this.parseExpression(); this.eat(";"); return { kind: "ThrowStmt", argument: a, line: t.line, col: t.col, file: this.file }; }
     if (this.at("try")) return this.parseTry();
     if (this.at("break")) { this.eat("break"); this.eat(";"); return { kind: "BreakStmt" }; }
     if (this.at("continue")) { this.eat("continue"); this.eat(";"); return { kind: "ContinueStmt" }; }
@@ -4690,12 +4690,17 @@ class Parser {
       if (t.value === "super") {
         if (!this.inErrorCtor) throw nyi(NYI.CLASS_FEATURE, `'super' is only supported in the constructor of a class that extends Error, at ${t.line}:${t.col}`);
         this.next(); this.eat("(");
-        //@@mutable
-        const args: Expr[] = [];
-        if (!this.at(")")) { do { if (this.at(")")) break; args.push(this.parseAssign()); } while (this.at(",") && (this.eat(","), true)); }
+        // NO ARRAY. The list existed only to be counted, and `args[0]!` then moved the
+        // expression out of a list this frame still owned (NT1605). The first argument goes
+        // straight into a binding and the rest are counted — same arity check, same message,
+        // and the trailing comma the `do`/`break` allowed is still allowed.
+        if (this.at(")")) throw nyi(NYI.CLASS_FEATURE, `super(...) with 0 arguments (an Error subclass takes a single message)`);
+        const message = this.parseAssign();
+        let argc = 1;
+        while (this.at(",") && (this.eat(","), true)) { if (this.at(")")) break; this.parseAssign(); argc++; }
         this.eat(")");
-        if (args.length !== 1) throw nyi(NYI.CLASS_FEATURE, `super(...) with ${args.length} arguments (an Error subclass takes a single message)`);
-        return { kind: "FieldAssign", object: this.ident("this"), field: "message", value: args[0]!, viaThis: true, inCtor: true };
+        if (argc !== 1) throw nyi(NYI.CLASS_FEATURE, `super(...) with ${argc} arguments (an Error subclass takes a single message)`);
+        return { kind: "FieldAssign", object: this.ident("this"), field: "message", value: message, viaThis: true, inCtor: true };
       }
       this.next();
       // SH4: `import { readFileSync as rfs }` renames a HOST BUILTIN, which has no
@@ -4902,9 +4907,12 @@ class Parser {
     for (const s of this.asyncParamScopes) for (const n of s) sub.inheritedAsyncParams = sub.inheritedAsyncParams.add(n);
     for (const n of this.inheritedAsyncParams) sub.inheritedAsyncParams = sub.inheritedAsyncParams.add(n);
     const out = sub.parseExpression();
-    for (const c of sub.identCalls) this.identCalls.push(c);
-    for (const e of sub.asyncEscapes) this.asyncEscapes.push(e);
-    for (const r of sub.returnEscapes) this.returnEscapes.push(r);
+    // BULK MOVES. Each loop moved its element out of a for-of binding, which borrows the
+    // sub-parser's array (NT1604); spreading says the same thing and leaves one owner. `sub`
+    // is finished and local, so nothing reads these three again.
+    this.identCalls = [...this.identCalls, ...sub.identCalls];
+    this.asyncEscapes = [...this.asyncEscapes, ...sub.asyncEscapes];
+    this.returnEscapes = [...this.returnEscapes, ...sub.returnEscapes];
     // The awaited POSITIONS have to come back now. They used to travel for free on the
     // shared node; the guard reads `awaitedCallLocs` instead, and that is per-parser state.
     // Without this merge `` `${await one()}` `` is refused as floating — the exact failure
