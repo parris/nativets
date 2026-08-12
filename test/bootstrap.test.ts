@@ -707,7 +707,9 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // held by the same six — the reflective walkers, 15 of them (test/walker-census.ts).
     // NT1011 out (the first typed walker), NT1606 back in — the ELEVENTH refill of this
     // bucket, now `esc.rets.push` on a field of the definite-assignment escapes record.
-    ["NT1004", "NT1606"],
+    // NT1606 out again, NT1002 back: a method call on `unknown`, in one of the ten
+    // reflective walkers still to go (test/walker-census.ts).
+    ["NT1002", "NT1004"],
     );
     // RE-MEASURED AT THE MERGE, and NEITHER SIDE WAS RIGHT — which is the whole argument
     // for re-measuring instead of picking one. This lane's list still carried NT1009
@@ -985,12 +987,18 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // checker.ts's definite-assignment escapes record, which the same six now inherit.
     // `modules.ts` is not among them — it is on parser.ts's NT1004, an ownership/codegen
     // blocker this table's checker view does not show, where parser.ts itself sits.
-    expect((byCode["NT1002"] ?? []).slice().sort()).toEqual([]);
+    // REFILLED: a method call on `unknown`, in one of the reflective walkers still to go.
+    expect((byCode["NT1002"] ?? []).slice().sort()).toEqual(
+      ["checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "ownership.ts"],
+    );
     // NT1011 empties: `daReads` is typed (the first of the reflective walkers, proved
     // equivalent to the one it replaces across the corpus). The same six fall through to
     // `esc.rets.push` — an array append on a field, which is NT1606 again.
     expect((byCode["NT1011"] ?? []).slice().sort()).toEqual([]);
-    expect((byCode["NT1606"] ?? []).slice().sort()).toEqual(
+    // NT1606 empties AGAIN, this time from the definite-assignment pass (marked escape
+    // arrays, snapshot name lists, and a difference in place of clear-and-refill).
+    expect((byCode["NT1606"] ?? []).slice().sort()).toEqual([]);
+    expect((byCode["NT1002"] ?? []).slice().sort()).toEqual(
       ["checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "ownership.ts"],
     );
     expect(byCode["NT1003"] ?? []).toEqual([]);
@@ -1084,7 +1092,10 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // the array one (see the note at the head of this file's NT1606 history).
     // REFILLED, by a different holder than the one the note above cleared: `esc.rets.push`
     // on a field of checker.ts's definite-assignment escapes record.
-    expect((byCode["NT1606"] ?? []).slice().sort()).toEqual(
+    // NT1606 empties AGAIN, this time from the definite-assignment pass (marked escape
+    // arrays, snapshot name lists, and a difference in place of clear-and-refill).
+    expect((byCode["NT1606"] ?? []).slice().sort()).toEqual([]);
+    expect((byCode["NT1002"] ?? []).slice().sort()).toEqual(
       ["checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "ownership.ts"],
     );
     // NT1702 — AN IMPORT CYCLE, and the one entry in this table that was not a missing
@@ -1238,12 +1249,18 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // that `mapTypesDeepStmt` rebuilds on the very next line, so it came out — and all six
     // fall through TOGETHER onto the reflective walkers (`for (const x of node)` over
     // `unknown`, NT1011). Six modules, one site: checker.ts's `daReads`.
-    expect((byCode["NT1002"] ?? []).slice().sort()).toEqual([]);
+    // REFILLED: a method call on `unknown`, in one of the reflective walkers still to go.
+    expect((byCode["NT1002"] ?? []).slice().sort()).toEqual(
+      ["checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "ownership.ts"],
+    );
     // NT1011 empties: `daReads` is typed (the first of the reflective walkers, proved
     // equivalent to the one it replaces across the corpus). The same six fall through to
     // `esc.rets.push` — an array append on a field, which is NT1606 again.
     expect((byCode["NT1011"] ?? []).slice().sort()).toEqual([]);
-    expect((byCode["NT1606"] ?? []).slice().sort()).toEqual(
+    // NT1606 empties AGAIN, this time from the definite-assignment pass (marked escape
+    // arrays, snapshot name lists, and a difference in place of clear-and-refill).
+    expect((byCode["NT1606"] ?? []).slice().sort()).toEqual([]);
+    expect((byCode["NT1002"] ?? []).slice().sort()).toEqual(
       ["checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "ownership.ts"],
     );
     // diagnostics.ts has now been round the houses: NT1606 (`[...spans].sort()`, cleared by
@@ -1345,7 +1362,10 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // the array one (see the note at the head of this file's NT1606 history).
     // REFILLED, by a different holder than the one the note above cleared: `esc.rets.push`
     // on a field of checker.ts's definite-assignment escapes record.
-    expect((byCode["NT1606"] ?? []).slice().sort()).toEqual(
+    // NT1606 empties AGAIN, this time from the definite-assignment pass (marked escape
+    // arrays, snapshot name lists, and a difference in place of clear-and-refill).
+    expect((byCode["NT1606"] ?? []).slice().sort()).toEqual([]);
+    expect((byCode["NT1002"] ?? []).slice().sort()).toEqual(
       ["checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "ownership.ts"],
     );
     // ...and NT1014 EMPTIES: the identity-keyed `Expr` collections in src/parser.ts are
@@ -1498,7 +1518,10 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // the array one (see the note at the head of this file's NT1606 history).
     // REFILLED, by a different holder than the one the note above cleared: `esc.rets.push`
     // on a field of checker.ts's definite-assignment escapes record.
-    expect((byCode["NT1606"] ?? []).slice().sort()).toEqual(
+    // NT1606 empties AGAIN, this time from the definite-assignment pass (marked escape
+    // arrays, snapshot name lists, and a difference in place of clear-and-refill).
+    expect((byCode["NT1606"] ?? []).slice().sort()).toEqual([]);
+    expect((byCode["NT1002"] ?? []).slice().sort()).toEqual(
       ["checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "ownership.ts"],
     );
     expect(byCode["NT1003"] ?? []).toEqual([]);

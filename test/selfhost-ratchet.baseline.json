@@ -1,11 +1,11 @@
 {
   "recordedAt": {
     "date": "2026-08-12",
-    "rev": "702478a"
+    "rev": "009a9d6"
   },
   "modules": {
     "ast.ts": {
-      "sha256": "b219239c8c3bd120",
+      "sha256": "cbbcabc225fbc1ad",
       "standalone": {
         "stage": "clear",
         "code": "",
@@ -18,7 +18,7 @@
       }
     },
     "checker.ts": {
-      "sha256": "dbee4f6cca8e03e7",
+      "sha256": "e1b42e3ed7390434",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -26,8 +26,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] arrays are immutable: `esc.rets.push` would mutate the array in place at L:C"
+        "code": "NT1002",
+        "message": "[NT1002] method call on unknown is not supported yet"
       }
     },
     "cli.ts": {
@@ -40,8 +40,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] arrays are immutable: `esc.rets.push` would mutate the array in place at L:C"
+        "code": "NT1002",
+        "message": "[NT1002] method call on unknown is not supported yet"
       }
     },
     "codegen.ts": {
@@ -53,8 +53,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] arrays are immutable: `esc.rets.push` would mutate the array in place at L:C"
+        "code": "NT1002",
+        "message": "[NT1002] method call on unknown is not supported yet"
       }
     },
     "coverage-preprocess.ts": {
@@ -80,8 +80,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] arrays are immutable: `esc.rets.push` would mutate the array in place at L:C"
+        "code": "NT1002",
+        "message": "[NT1002] method call on unknown is not supported yet"
       }
     },
     "diagnostics.ts": {
@@ -107,8 +107,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] arrays are immutable: `esc.rets.push` would mutate the array in place at L:C"
+        "code": "NT1002",
+        "message": "[NT1002] method call on unknown is not supported yet"
       }
     },
     "lexer.ts": {
@@ -147,12 +147,12 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] arrays are immutable: `esc.rets.push` would mutate the array in place at L:C"
+        "code": "NT1002",
+        "message": "[NT1002] method call on unknown is not supported yet"
       }
     },
     "parser.ts": {
-      "sha256": "0d36aedd8c4ef736",
+      "sha256": "1d31a3edaa399d1c",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
