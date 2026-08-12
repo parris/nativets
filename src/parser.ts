@@ -4435,8 +4435,14 @@ class Parser {
       const op = this.next().value as "++" | "--";
       const operand = this.parseUnary();
       if (operand.kind === "Identifier") return { kind: "UpdateExpr", op, prefix: true, target: operand.name };
-      if (operand.kind === "MemberExpr" || operand.kind === "IndexExpr")
-        return { kind: "UpdateExpr", op, prefix: true, target: "", targetExpr: this.updateTarget(operand) };
+      if (operand.kind === "MemberExpr" || operand.kind === "IndexExpr") {
+        // VETS, then the node is built here. `updateTarget` used to hand the parameter back,
+        // which is NT1604 — a parameter is a borrow and the caller still owns the value. It
+        // only ever inspected the target and threw, so it returns `void` and ownership never
+        // leaves this frame.
+        this.updateTarget(operand);
+        return { kind: "UpdateExpr", op, prefix: true, target: "", targetExpr: operand };
+      }
       throw parseError("Invalid update target");
     }
     return this.parsePostfix();
@@ -4448,7 +4454,7 @@ class Parser {
    * field is NT1606; an INDEX target is deferred to the checker, which accepts a mutable
    * `Uint8Array` element and rejects an immutable array/object element.
    */
-  private updateTarget(target: Expr): Expr {
+  private updateTarget(target: Expr): void {
     // `++`/`--` is a read AND a write, so the same early error applies as for `=`.
     if (isOptChainTarget(target)) optChainWriteError("`a?.b++` / `a?.[i]++`");
     if (target.kind === "MemberExpr") {
@@ -4463,7 +4469,6 @@ class Parser {
         );
       }
     }
-    return target;
   }
 
   // Disambiguate a `<` after a primary between call-site TYPE ARGUMENTS (`f<T>(x)`)
@@ -4613,8 +4618,17 @@ class Parser {
           expr = { kind: "UpdateExpr", op, prefix: false, target: target.name };
         } else if (target.kind === "MemberExpr" || target.kind === "IndexExpr") {
           const op = this.next().value as "++" | "--";
-          expr = { kind: "UpdateExpr", op, prefix: false, target: "", targetExpr: this.updateTarget(target) };
-        } else break;
+          this.updateTarget(target); // vets and throws; see the prefix site
+          expr = { kind: "UpdateExpr", op, prefix: false, target: "", targetExpr: target };
+        } else {
+          // HANDED BACK before leaving. `const target = expr` moves, and the two branches
+          // above each rebind `expr` to a node built from it — but a bare `break` here left
+          // `expr` moved-from for `return expr` below, and for the next turn of the loop.
+          // The alias exists only so the tag test narrows; on this path it narrows to
+          // nothing, so the value goes straight back where it came from.
+          expr = target;
+          break;
+        }
       } else break;
     }
     return expr;
