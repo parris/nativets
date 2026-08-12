@@ -1135,7 +1135,27 @@ function specializeDecl(tmpl: FuncDecl, name: string, bindings: Map<string, Ty>)
   // `tmpl.typeParams!` on the template, so undefined and absent are the same thing at
   // every use site; and `delete` is refused by this very compiler (NT1606), so writing
   // it would plant a self-hosting blocker in the file that emits the diagnostic.
-  const spec = structuredClone({ ...tmpl, name, typeParams: undefined }) as FuncDecl;
+  // NO `structuredClone`. `mapTypesDeepStmt` on the next line ALREADY returns a fully
+  // fresh tree: `walkStmtChildren`/`walkExprChildren` rebuild every node with `{ ...n }`
+  // — every arm, leaves included — and there is no `default:` arm to pass one through, so
+  // nothing of the template survives into the specialization by reference. The deep copy
+  // was doing the same work a second time.
+  //
+  // The fields the spread carries over (`endDrops`, `setter`, `isStatic`, …) are scalars
+  // or string arrays that later passes REBIND rather than mutate, and arrays are immutable
+  // here anyway — so sharing them is not sharing state.
+  //
+  // It also unblocks six modules. `structuredClone` of a RECURSIVE type is NT1002 (the
+  // generated deep copy has no seen-set, so it would alias rather than copy — codegen
+  // refuses it outright), and `FuncDecl` is recursive through `Stmt`. This was stage-1's
+  // blocker and `checker.ts`, `codegen.ts`, `ownership.ts`, `cli.ts`, `coverage.ts` and
+  // `driver.ts` all sat behind it.
+  // ANNOTATED, not `as FuncDecl`. An `as` assertion does not convert — it reinterprets the
+  // operand at the asserted layout, so it demands the literal ALREADY have that layout and
+  // a spread does not prove it (NT2001). An annotation is a CONTEXT the literal is reshaped
+  // into (`retypeLiteral`), which is the same program and the spelling this checker
+  // supports — the note on `parseClass`'s lowered constructor says the same thing.
+  const spec: FuncDecl = { ...tmpl, name, typeParams: undefined };
   return mapTypesDeepStmt(spec, (t) => substTypeParams(t, bindings)) as FuncDecl;
 }
 
