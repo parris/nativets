@@ -1,11 +1,11 @@
 {
   "recordedAt": {
-    "date": "2026-08-11",
-    "rev": "4f75adf"
+    "date": "2026-08-12",
+    "rev": "c2a4db3"
   },
   "modules": {
     "ast.ts": {
-      "sha256": "72d81df3bbf28198",
+      "sha256": "1c76c1a0c0e7f106",
       "standalone": {
         "stage": "clear",
         "code": "",
@@ -18,7 +18,7 @@
       }
     },
     "checker.ts": {
-      "sha256": "001f82eff6401c4f",
+      "sha256": "257a7cecde1fc1d8",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -40,8 +40,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] an object literal for {kind:string,value:number,ty:?Ustring} | {kind:string,value:boolean,ty:?Ustring} | {kind:string,value:string,ty:?Ustring} | {kind:string,quasis:string[],exprs:@_nts0_m2_…"
+        "code": "NT1606",
+        "message": "[NT1606] arrays are immutable: `stack.push` would mutate the array in place at L:C"
       }
     },
     "codegen.ts": {
@@ -80,8 +80,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] an object literal for {kind:string,value:number,ty:?Ustring} | {kind:string,value:boolean,ty:?Ustring} | {kind:string,value:string,ty:?Ustring} | {kind:string,quasis:string[],exprs:@_nts0_m0_…"
+        "code": "NT1606",
+        "message": "[NT1606] arrays are immutable: `stack.push` would mutate the array in place at L:C"
       }
     },
     "diagnostics.ts": {
@@ -107,8 +107,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] an object literal for {kind:string,value:number,ty:?Ustring} | {kind:string,value:boolean,ty:?Ustring} | {kind:string,value:string,ty:?Ustring} | {kind:string,quasis:string[],exprs:@_nts0_m2_…"
+        "code": "NT1606",
+        "message": "[NT1606] arrays are immutable: `stack.push` would mutate the array in place at L:C"
       }
     },
     "lexer.ts": {
@@ -133,8 +133,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] an object literal for {kind:string,value:number,ty:?Ustring} | {kind:string,value:boolean,ty:?Ustring} | {kind:string,value:string,ty:?Ustring} | {kind:string,quasis:string[],exprs:@_nts0_m2_…"
+        "code": "NT1606",
+        "message": "[NT1606] arrays are immutable: `stack.push` would mutate the array in place at L:C"
       }
     },
     "ownership.ts": {
@@ -152,16 +152,16 @@
       }
     },
     "parser.ts": {
-      "sha256": "349ef535915c9985",
+      "sha256": "9a51b6111ac282a9",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
         "message": "[NT2001] Property 'kind' does not exist on number at L:C"
       },
       "linked": {
-        "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] an object literal for {kind:string,value:number,ty:?Ustring} | {kind:string,value:boolean,ty:?Ustring} | {kind:string,value:string,ty:?Ustring} | {kind:string,quasis:string[],exprs:@_nt_m2_Ex…"
+        "stage": "ownership",
+        "code": "NT1604",
+        "message": "[NT1604] cannot move out of `tokens`: it is borrowed (the owner is elsewhere)"
       }
     }
   }

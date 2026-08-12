@@ -676,7 +676,15 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // PRESENCE — so a loop with a boolean says the same thing and borrows nothing.
     // ...and NT1606 leaves again: the last three field stamps in src/parser.ts take the
     // BINDING-level opt-in, which now survives narrowing and reaches arrow parameters.
-    ["NT1002", "NT2001"],
+    // ...and the set SPLITS INTO THREE for the first time, because src/parser.ts left it.
+    // parser.ts is CHECKER-CLEAN now (0 of 118 functions refused, from a long chain at the
+    // start of this session), so it no longer shares a code with the four modules that
+    // inherited its refusal — they blame src/modules.ts now, and parser.ts sits on an
+    // OWNERSHIP blocker (NT1604), a different pass entirely.
+    //
+    // Three codes is what a frontier looks like when a shared term is genuinely removed
+    // rather than moved: the conjunction this file keeps recording has one fewer factor.
+    ["NT1002", "NT1604", "NT1606"],
     );
     // RE-MEASURED AT THE MERGE, and NEITHER SIDE WAS RIGHT — which is the whole argument
     // for re-measuring instead of picking one. This lane's list still carried NT1009
@@ -789,9 +797,7 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // ...and NT2001 holds the parser group again, one code further along after four
     // more src/parser.ts shapes came off (an annotated empty literal, `unshift`, a
     // `for-of` element write rebuilt as a list, and a nullable field read).
-    expect(byCode["NT2001"]?.slice().sort() ?? []).toEqual(
-      ["cli.ts", "coverage.ts", "driver.ts", "modules.ts", "parser.ts"],
-    );
+    expect(byCode["NT2001"]?.slice().sort() ?? []).toEqual([]);
     // The five modules moved TOGETHER onto ast.ts's next one — `HOST_MODULES`, a `Record`
     // initialized with an object literal. Same set, one code further along; asserted here
     // so the group staying a group is visible rather than inferred.
@@ -950,8 +956,11 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // arrived after six blockers came off parser.ts in one sitting (Set<string>[] ->
     // deferred.push -> a nullable Map value -> a stale `as` assertion), and what holds
     // them now is `cannot infer type of arrow parameter`.
-    expect((byCode["NT2001"] ?? []).slice().sort()).toEqual(
-      ["cli.ts", "coverage.ts", "driver.ts", "modules.ts", "parser.ts"],
+    expect((byCode["NT2001"] ?? []).slice().sort()).toEqual([]);
+    // The four that inherited parser.ts's refusal now blame src/modules.ts; parser.ts
+    // itself is on an ownership blocker and no longer in this table's checker view.
+    expect((byCode["NT1606"] ?? []).slice().sort()).toEqual(
+      ["cli.ts", "coverage.ts", "driver.ts", "modules.ts"],
     );
     expect((byCode["NT1002"] ?? []).slice().sort()).toEqual(
       ["checker.ts", "codegen.ts", "ownership.ts"],
@@ -1041,7 +1050,11 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // never the three that emptied it. `t.value = v`, a field write on a lexer token.
     // Another holder substitution under an unchanged code, which is the case these
     // assertions were made memberships to catch.
-    expect((byCode["NT1606"] ?? []).slice().sort()).toEqual([]);
+    // ...and NT1606 holds the FOUR modules that used to inherit parser.ts's refusal —
+    // four, not five, because parser.ts itself is checker-clean now and blames nobody.
+    expect((byCode["NT1606"] ?? []).slice().sort()).toEqual(
+      ["cli.ts", "coverage.ts", "driver.ts", "modules.ts"],
+    );
     // NT1702 — AN IMPORT CYCLE, and the one entry in this table that was not a missing
     // feature. `coverage.ts` and `coverage-preprocess.ts` imported each other, which the
     // linker refuses by design; it never had a chance to say so while ast.ts's refusal
@@ -1286,7 +1299,10 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // on a Set), left deliberately for a lane that owns Set accumulators -- `Scope.hits`
     // is read from outside its class, so rebinding it is a real aliasing question.
     // ...and NT1606 refills with the parser group (see the note above).
-    expect((byCode["NT1606"] ?? []).slice().sort()).toEqual([]);
+    // ...and NT1606 holds the four modules behind src/modules.ts (see the note above).
+    expect((byCode["NT1606"] ?? []).slice().sort()).toEqual(
+      ["cli.ts", "coverage.ts", "driver.ts", "modules.ts"],
+    );
     // ...and NT1014 EMPTIES: the identity-keyed `Expr` collections in src/parser.ts are
     // node stamps now and the `Map<string, Set<number>>` is a `Map<string, number[]>`.
     // The five move together to NT1001 (`Set<string>[]`), asserted above.
@@ -1302,7 +1318,11 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     //
     // `diagnostics.ts` is therefore the FIRST module in the tree that contributes no
     // blocker at all: it produces IR, links, and runs (test/sh6.test.ts, rung 3).
-    expect(byCode["NT1604"]).toBeUndefined();
+    // ...and NT1604 is BACK, held by src/parser.ts alone — which is the good news in
+    // disguise. parser.ts is CHECKER-CLEAN (0 of 118 functions refused), so what stops
+    // it is an OWNERSHIP blocker: a different pass, reached only because everything
+    // before it now passes.
+    expect((byCode["NT1604"] ?? []).slice().sort()).toEqual(["parser.ts"]);
     // RATCHET MOVE (short-circuit narrowing): the NT2001 bucket is now EMPTY. It held
     // one module, `diagnostics.ts`, on `!diag.spans || diag.spans.length === 0` — a
     // FALSE POSITIVE (correct TypeScript, correct at runtime) because a guard did not
@@ -1420,8 +1440,11 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // does not narrow) and four more blockers came off behind it in the same sitting.
     // ...and NT2001 refills with parser.ts and the four modules that link it — a
     // different five from the ones that emptied it (see the note above).
-    expect((byCode["NT2001"] ?? []).slice().sort()).toEqual(
-      ["cli.ts", "coverage.ts", "driver.ts", "modules.ts", "parser.ts"],
+    expect((byCode["NT2001"] ?? []).slice().sort()).toEqual([]);
+    // The four that inherited parser.ts's refusal now blame src/modules.ts; parser.ts
+    // itself is on an ownership blocker and no longer in this table's checker view.
+    expect((byCode["NT1606"] ?? []).slice().sort()).toEqual(
+      ["cli.ts", "coverage.ts", "driver.ts", "modules.ts"],
     );
     expect(byCode["NT1003"] ?? []).toEqual([]);
     // NEW BUCKET, and it is one module deep: the captured-binding write behind the arrow.

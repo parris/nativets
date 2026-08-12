@@ -19,7 +19,7 @@ import {
 } from "./ast.ts";
 import type {
   Program, Stmt, Expr, Param, VarDecl, Declarator, Ty, BinaryOp, SwitchCase, ObjectProperty, FuncDecl,
-  ImportDecl, TextImport, ExportTable, RecTypeEntry, AssignOp, Loc,
+  ImportDecl, TextImport, ExportTable, RecTypeEntry, AssignOp, Loc, CallExpr,
 } from "./ast.ts";
 
 /** Options for parsing ONE module of a program (see src/modules.ts). */
@@ -4037,6 +4037,7 @@ class Parser {
     let left = this.parseConditional();
     while (this.at("|>")) {
       const op = this.next();
+      //@@mutable
       const rhs = this.parseConditional();
       if (rhs.kind !== "CallExpr") {
         throw parseError(`Right side of '|>' must be a call (e.g. \`x |> f()\`) at ${op.line}:${op.col}`);
@@ -4045,7 +4046,14 @@ class Parser {
         throw parseError(`'|>' target must be a named function or function-valued variable (member/method callees are unsupported) at ${op.line}:${op.col}`);
       }
       // Thread the piped value into argument slot 0; written args shift right.
-      left = { ...rhs, args: [left, ...rhs.args] };
+      //
+      // STORED, not rebuilt. `{ ...rhs, args: … }` is a SPREAD-ONLY literal in a union
+      // position: it shows the checker no `kind`, so it cannot tell which member it builds
+      // (NT2001). The guards above have already narrowed `rhs` to the `CallExpr` member,
+      // and a `@@mutable` binding may store its fields — so the one field that changes is
+      // simply assigned, and the node keeps its identity.
+      rhs.args = [left, ...rhs.args];
+      left = rhs;
     }
     return left;
   }
@@ -4334,34 +4342,43 @@ class Parser {
         }
         this.eat(")");
         const callLoc = { line: lp.line, col: lp.col, file: this.file };
-        expr = pendingTypeArgs
-          ? { kind: "CallExpr", callee: expr, args, typeArgs: pendingTypeArgs, loc: callLoc }
-          : { kind: "CallExpr", callee: expr, args, loc: callLoc };
+        // Built into a CONST first, and with ONE literal rather than a ternary. Two things
+        // are wrong with the shape this replaces: the ternary's arms differ (`typeArgs`
+        // present in one, absent in the other), and `expr` is a `let` REASSIGNED IN A
+        // LOOP, so a tag test on it below cannot narrow — every `expr.callee` read was
+        // `Property 'callee' does not exist on <the Expr union>`.
+        //
+        // `typeArgs: pendingTypeArgs ?? undefined` says exactly what the absent key said:
+        // the field is optional and every reader is `e.typeArgs?.length`.
+        const call: CallExpr = {
+          kind: "CallExpr", callee: expr, args, typeArgs: pendingTypeArgs ?? undefined, loc: callLoc,
+        };
+        expr = call;
         pendingTypeArgs = null;
         // Record plain `f(...)` calls so an un-awaited call to an `async function`
         // can be rejected after the whole program is parsed (see checkFloatingAsyncCalls).
-        if (expr.callee.kind === "Identifier") {
-          const loc = expr.callee.loc ?? { line: 0, col: 0 };
-          const scopedAsync = this.inAsyncParamScope(expr.callee.name);
-          this.identCalls.push({ node: expr, name: expr.callee.name, line: loc.line, col: loc.col, scopedAsync });
-        } else if (expr.callee.kind === "ArrowFunction" && (expr.callee.isAsync ?? false)) {
+        if (call.callee.kind === "Identifier") {
+          const loc = call.callee.loc ?? { line: 0, col: 0 };
+          const scopedAsync = this.inAsyncParamScope(call.callee.name);
+          this.identCalls.push({ node: call, name: call.callee.name, line: loc.line, col: loc.col, scopedAsync });
+        } else if (call.callee.kind === "ArrowFunction" && (call.callee.isAsync ?? false)) {
           // An immediately-invoked async arrow, `(async () => …)()`. It never binds a
           // name, so the name-based path above cannot see it; the callee NODE is the
           // identity. Recorded under a descriptive name so the guard reads the same.
-          this.identCalls.push({ node: expr, name: "(async arrow)", line: callLoc.line, col: callLoc.col });
+          this.identCalls.push({ node: call, name: "(async arrow)", line: callLoc.line, col: callLoc.col });
           this.asyncFns = this.asyncFns.add("(async arrow)"); // not a legal identifier, so it collides with nothing
-        } else if (expr.callee.kind === "CallExpr" && expr.callee.callee.kind === "Identifier" &&
-                   this.returnsAsyncFn.has(expr.callee.callee.name)) {
+        } else if (call.callee.kind === "CallExpr" && call.callee.callee.kind === "Identifier" &&
+                   this.returnsAsyncFn.has(call.callee.callee.name)) {
           // `pick()()`, where `pick(): () => Promise<T>` — the callee is the RESULT of a
           // call, so there is no name; the declared return type is the identity.
-          const label = `${expr.callee.callee.name}()`;
-          this.identCalls.push({ node: expr, name: label, line: callLoc.line, col: callLoc.col });
+          const label = `${call.callee.callee.name}()`;
+          this.identCalls.push({ node: call, name: label, line: callLoc.line, col: callLoc.col });
           this.asyncFns = this.asyncFns.add(label); // `pick()` is not an identifier, so it collides with nothing
         }
         // Record every argument that could hand an ASYNC function VALUE across this call —
         // the one place the guard's name tracking ends. Resolved after the file is parsed
         // (see checkAsyncEscapes): both the callee and an `async function` argument hoist.
-        const calleeName = expr.callee.kind === "Identifier" ? expr.callee.name : null;
+        const calleeName = call.callee.kind === "Identifier" ? call.callee.name : null;
         args.forEach((a, i) => {
           const asyncArrow = a.kind === "ArrowFunction" && (a.isAsync ?? false);
           if (!asyncArrow && a.kind !== "Identifier") return;
@@ -4378,12 +4395,19 @@ class Parser {
         // committed when a balanced `<...>` is immediately followed by `(` (a call),
         // otherwise `<` is left for the binary parser to read as less-than (see helper).
         continue; // the following `(` is handled by the call branch next iteration
-      } else if ((this.at("++") || this.at("--")) && expr.kind === "Identifier") {
-        const op = this.next().value as "++" | "--";
-        expr = { kind: "UpdateExpr", op, prefix: false, target: expr.name };
-      } else if ((this.at("++") || this.at("--")) && (expr.kind === "MemberExpr" || expr.kind === "IndexExpr")) {
-        const op = this.next().value as "++" | "--";
-        expr = { kind: "UpdateExpr", op, prefix: false, target: "", targetExpr: this.updateTarget(expr) };
+      } else if (this.at("++") || this.at("--")) {
+        // Aliased to a CONST before the tag test. `expr` is a `let` reassigned every
+        // iteration of this loop, so a test on it in the `else if` condition does not
+        // narrow the body — `expr.name` was `Property 'name' does not exist on <the Expr
+        // union>`. The alias is what the narrowing attaches to.
+        const target = expr;
+        if (target.kind === "Identifier") {
+          const op = this.next().value as "++" | "--";
+          expr = { kind: "UpdateExpr", op, prefix: false, target: target.name };
+        } else if (target.kind === "MemberExpr" || target.kind === "IndexExpr") {
+          const op = this.next().value as "++" | "--";
+          expr = { kind: "UpdateExpr", op, prefix: false, target: "", targetExpr: this.updateTarget(target) };
+        } else break;
       } else break;
     }
     return expr;
@@ -4675,24 +4699,46 @@ function skipQuoted(raw: string, i: number): QuotedRun {
 
 /** Every `return <expr>` in a statement list, recursively. Expressions are not walked,
  *  so a nested arrow's own returns (a different function) are correctly ignored. */
+/** The recursive half of `valueReturns`, with the accumulator as a `//@@mutable`
+ *  PARAMETER rather than a capture.
+ *
+ *  It was a nested `const walk = (stmts) => …` closing over `out`, which is `NT1607` BY
+ *  DECISION: a closure has its own environment, so the declaring scope is no longer the
+ *  only handle on the accumulator and the in-place append cannot be proved sound. That
+ *  refusal stands — this is not a way around it. The per-parameter opt-in is the sanctioned
+ *  spelling for exactly this shape (the obligation travels to the call site, which a
+ *  capture cannot express), and `walk` is RECURSIVE so the inline-it-at-the-call-sites fix
+ *  that unblocked coverage-preprocess.ts is not available here. */
+function collectValueReturns(
+  stmts: Stmt[],
+  //@@mutable
+  out: Expr[],
+): void {
+  for (const s of stmts) {
+    switch (s.kind) {
+      case "ReturnStmt": if (s.argument) out.push(s.argument); break;
+      case "IfStmt":
+        collectValueReturns(s.consequent, out);
+        if (s.alternate) collectValueReturns(s.alternate, out);
+        break;
+      case "WhileStmt": case "DoWhileStmt": case "ForStmt": case "ForOfStmt": case "ForInStmt":
+      case "BlockStmt": collectValueReturns(s.body, out); break;
+      case "SwitchStmt": for (const c of s.cases) collectValueReturns(c.body, out); break;
+      case "TryStmt":
+        collectValueReturns(s.block, out);
+        if (s.handler) collectValueReturns(s.handler, out);
+        if (s.finalizer) collectValueReturns(s.finalizer, out);
+        break;
+      case "MultiStmt": collectValueReturns(s.stmts, out); break;
+      default: break;
+    }
+  }
+}
+
 function valueReturns(list: Stmt[]): Expr[] {
   //@@mutable
   const out: Expr[] = [];
-  const walk = (stmts: Stmt[]): void => {
-    for (const s of stmts) {
-      switch (s.kind) {
-        case "ReturnStmt": if (s.argument) out.push(s.argument); break;
-        case "IfStmt": walk(s.consequent); if (s.alternate) walk(s.alternate); break;
-        case "WhileStmt": case "DoWhileStmt": case "ForStmt": case "ForOfStmt": case "ForInStmt":
-        case "BlockStmt": walk(s.body); break;
-        case "SwitchStmt": for (const c of s.cases) walk(c.body); break;
-        case "TryStmt": walk(s.block); if (s.handler) walk(s.handler); if (s.finalizer) walk(s.finalizer); break;
-        case "MultiStmt": walk(s.stmts); break;
-        default: break;
-      }
-    }
-  };
-  walk(list);
+  collectValueReturns(list, out);
   return out;
 }
 
