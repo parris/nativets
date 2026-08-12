@@ -8505,17 +8505,28 @@ function daIsExit(e: Expr): boolean {
     e.callee.object.kind === "Identifier" && e.callee.object.name === "process";
 }
 
-/** Intersect `flow` down to the names assigned on every non-diverging incoming path. */
-function daMerge(paths: { flow: DAFlow; diverged: boolean }[], fallback: DAFlow): DAFlow {
-  const live = paths.filter((p) => !p.diverged);
+/**
+ * Intersect down to the names assigned on every incoming path.
+ *
+ * TAKES NAME LISTS, not `Set`s. `Set<string>[]` is NT1001 here — arrays of sets have no
+ * representation — which is what an escape collector holding `DAFlow[]` ran into. A flow
+ * SNAPSHOT is a `string[]`; the working set stays a `Set`, where membership is asked. The
+ * callers filter out the diverging paths themselves, which is why the `{flow, diverged}`
+ * record this used to take is gone: that record held a `Set` and would have hit the same
+ * refusal one level in.
+ */
+function daMerge(live: string[][], fallback: DAFlow): DAFlow {
   if (live.length === 0) return new Set(fallback); // every path left; nothing merges here
   // REBUILT per path, not deleted from. `.delete` is the one persistent mutator with no
   // rebinding spelling that survives both runtimes: node's `.delete` returns a BOOLEAN, so
   // `out = out.delete(n)` would leave `out === true` under bun. Filtering into a fresh Set
   // says the same thing under both, and costs what the discarded form already cost — the
   // old line materialized `[...out]` per path to iterate it safely anyway.
-  let out = new Set(live[0]!.flow);
-  for (const p of live.slice(1)) out = new Set([...out].filter((n) => p.flow.has(n)));
+  let out = new Set(live[0]!);
+  for (const names of live.slice(1)) {
+    const s = new Set(names);
+    out = new Set([...out].filter((n) => s.has(n)));
+  }
   return out;
 }
 
@@ -8557,10 +8568,34 @@ type DAExit = "fall" | "left";
  */
 type DAEscapes = { breaks: DAFlow[]; conts: DAFlow[]; rets: DAFlow[] } | null;
 
-/** Live incoming paths, in the shape `daMerge` reads. */
-const daLive = (flows: DAFlow[]): { flow: DAFlow; diverged: boolean }[] =>
-  flows.map((flow) => ({ flow, diverged: false }));
+/** A flow SNAPSHOT — what an escape path carries, in the shape `daMerge` reads. Recorded
+ *  as a name list because `Set<string>[]` has no representation here (NT1001). */
+function daSnapshot(flow: DAFlow): string[] { return [...flow]; }
 
+/** The paths that did NOT diverge, as snapshots. */
+function daKeep(flow: DAFlow, diverged: boolean): string[][] { return diverged ? [] : [daSnapshot(flow)]; }
+
+
+/**
+ * Replace `flow`'s contents with `next`, in place.
+ *
+ * `flow.clear()` then refill is the natural spelling and `Set.clear` is NT1014 here. The
+ * difference between the two sets is what actually has to change, so this asks for it
+ * directly — and it is strictly less work than clear-and-refill, since a name in both
+ * stays put instead of being removed and re-added.
+ *
+ * The removal list is SNAPSHOT first (`[...flow]`): deleting from a set while iterating it
+ * is the iterator-invalidation shape this compiler refuses elsewhere, and there is no
+ * reason to write it here.
+ */
+function daReplace(
+  //@@mutable
+  flow: DAFlow,
+  next: DAFlow,
+): void {
+  for (const n of [...flow]) if (!next.has(n)) flow.delete(n);
+  for (const n of next) flow.add(n);
+}
 
 /** Analyze a statement list. Returns whether control reaches past its end. */
 function daBlock(
@@ -8594,11 +8629,11 @@ function daBlock(
   // without a guard at every push: a path recorded into a list nobody reads is discarded
   // either way, which is what `esc ? esc.rets : []` was already doing at every loop.
   //@@mutable
-  breaks: DAFlow[],
+  breaks: string[][],
   //@@mutable
-  conts: DAFlow[],
+  conts: string[][],
   //@@mutable
-  rets: DAFlow[],
+  rets: string[][],
 ): DAExit {
   for (const s of body) {
     if (daStmt(s, tracked, shapeOnly, flow, breaks, conts, rets) === "left") return "left"; // the rest is unreachable
@@ -8642,11 +8677,11 @@ function daStmt(
   // without a guard at every push: a path recorded into a list nobody reads is discarded
   // either way, which is what `esc ? esc.rets : []` was already doing at every loop.
   //@@mutable
-  breaks: DAFlow[],
+  breaks: string[][],
   //@@mutable
-  conts: DAFlow[],
+  conts: string[][],
   //@@mutable
-  rets: DAFlow[],
+  rets: string[][],
 ): DAExit {
   switch (s.kind) {
     case "VarDecl":
@@ -8696,12 +8731,12 @@ function daStmt(
     // A `return` leaves the function — no later read can be reached from it, which is why
     // the local question needs nothing more than "left". The flow is still SNAPSHOT here,
     // for the caller that asks about the function's EXITS rather than a read inside it.
-    case "ReturnStmt": daUse(s.argument, tracked, flow); rets.push(new Set(flow)); return "left";
+    case "ReturnStmt": daUse(s.argument, tracked, flow); rets.push(daSnapshot(flow)); return "left";
     case "ThrowStmt": daUse(s.argument, tracked, flow); return "left";
     // These land somewhere ELSE that is still reachable, carrying what they have assigned
     // SO FAR — so the snapshot has to be taken right here, where the path leaves.
-    case "BreakStmt": breaks.push(new Set(flow)); return "left";
-    case "ContinueStmt": conts.push(new Set(flow)); return "left";
+    case "BreakStmt": breaks.push(daSnapshot(flow)); return "left";
+    case "ContinueStmt": conts.push(daSnapshot(flow)); return "left";
 
     case "IfStmt": {
       daUse(s.test, tracked, flow);
@@ -8711,8 +8746,8 @@ function daStmt(
       const altExit: DAExit = s.alternate ? daBlock(s.alternate, tracked, shapeOnly, alt, breaks, conts, rets) : "fall";
       // Only an arm that reaches THIS point contributes to the intersection; one that
       // left is already recorded wherever it landed.
-      const merged = daMerge([{ flow: con, diverged: conExit === "left" }, { flow: alt, diverged: altExit === "left" }], flow);
-      flow.clear(); for (const n of merged) flow.add(n);
+      const merged = daMerge([...daKeep(con, conExit === "left"), ...daKeep(alt, altExit === "left")], flow);
+      daReplace(flow, merged);
       return conExit === "fall" || altExit === "fall" ? "fall" : "left";
     }
 
@@ -8735,15 +8770,15 @@ function daStmt(
       //     do { if (c) break; n = 7; } while (false);
       //     do { continue; } while (false);        // `continue` runs the TEST, then exits
       //@@mutable
-      const myBreaks: DAFlow[] = [];
+      const myBreaks: string[][] = [];
       //@@mutable
-      const myConts: DAFlow[] = [];
+      const myConts: string[][] = [];
       const body = new Set(flow);
       const exit = daBlock(s.body, tracked, shapeOnly, body, myBreaks, myConts, rets);
       const after = daMerge(
-        [{ flow: body, diverged: exit === "left" }, ...daLive(myBreaks), ...daLive(myConts)],
+        [...daKeep(body, exit === "left"), ...myBreaks, ...myConts],
         flow);
-      flow.clear(); for (const n of after) flow.add(n);
+      daReplace(flow, after);
       daUse(s.test, tracked, flow);
       // Only a body with no way out at all — every path returns or throws — diverges.
       return exit === "fall" || myBreaks.length > 0 || myConts.length > 0 ? "fall" : "left";
@@ -8784,19 +8819,27 @@ function daStmt(
       // intersection. A `continue` is NOT — it jumps to the enclosing loop's head, past
       // this exit — so `conts` is passed through to the loop that owns it.
       //@@mutable
-      const myBreaks: DAFlow[] = [];
-      const paths = s.cases.map((c) => {
+      const myBreaks: string[][] = [];
+      // SNAPSHOTS, so a diverging arm contributes NOTHING rather than a flagged record —
+      // `daKeep` returns an empty list for one. The two questions the old `diverged` flag
+      // answered are both still asked, just differently: what merges is `all`, and whether
+      // ANY path reaches the exit is now `all.length > 0` instead of `every(p.diverged)`.
+      // `paths` is built with a loop rather than `.map` because each arm must run
+      // `daBlock` for its side effects on `myBreaks`/`conts`/`rets` in source order.
+      //@@mutable
+      const paths: string[][] = [];
+      for (const c of s.cases) {
         const f = new Set(flow);
         if (c.test) daUse(c.test, tracked, f);
-        return { flow: f, diverged: daBlock(c.body, tracked, shapeOnly, f, myBreaks, conts, rets) === "left" };
-      });
+        const left = daBlock(c.body, tracked, shapeOnly, f, myBreaks, conts, rets) === "left";
+        for (const snap of daKeep(f, left)) paths.push(snap);
+      }
       const hasDefault = s.cases.some((c) => c.test === null);
-      const all = [...paths, ...daLive(myBreaks)];
+      const all = [...paths, ...myBreaks];
       const merged = hasDefault ? daMerge(all, flow) : new Set(flow);
-      flow.clear(); for (const n of merged) flow.add(n);
-      // The last case falling out the bottom reaches the exit too — that is `diverged`
-      // being false for it, which `every` already accounts for.
-      return hasDefault && all.every((p) => p.diverged) ? "left" : "fall";
+      daReplace(flow, merged);
+      // The last case falling out the bottom reaches the exit too — it is one of `all`.
+      return hasDefault && all.length === 0 ? "left" : "fall";
     }
 
     case "TryStmt": {
@@ -8809,14 +8852,14 @@ function daStmt(
         // before any assignment in the block landed, so none of them can be assumed.
         const catchFlow = new Set(flow);
         const catchExit = daBlock(s.handler, tracked, shapeOnly, catchFlow, breaks, conts, rets);
-        after = daMerge([{ flow: tryFlow, diverged: tryExit === "left" }, { flow: catchFlow, diverged: catchExit === "left" }], flow);
+        after = daMerge([...daKeep(tryFlow, tryExit === "left"), ...daKeep(catchFlow, catchExit === "left")], flow);
         exit = tryExit === "fall" || catchExit === "fall" ? "fall" : "left";
       } else {
         // try/finally with no catch: reaching past it means the block COMPLETED.
         after = tryFlow;
         exit = tryExit;
       }
-      flow.clear(); for (const n of after) flow.add(n);
+      daReplace(flow, after);
       if (s.finalizer) { // the finalizer always runs, so its assignments are kept
         // ...and it can OVERRIDE how the try left: a `return`/`break` in a `finally`
         // wins over whatever the block was doing (node agrees — that is why `finally`
@@ -8909,12 +8952,14 @@ function daCtorFieldTys(fn: FuncDecl): DATracked {
 
 /** Refuse every field of `fn` that some path out of the constructor leaves unwritten. */
 function daCheckCtorExit(
-  fn: FuncDecl, fields: DATracked, flow: DAFlow, exit: DAExit, rets: DAFlow[],
+  fn: FuncDecl, fields: DATracked, flow: DAFlow, exit: DAExit, rets: string[][],
 ): void {
-  const paths = [{ flow, diverged: exit === "left" }, ...daLive(rets)];
-  // Every path left by `throw`: no instance ever escapes, so there is nothing to prove.
-  // `daMerge`'s own fallback would answer "nothing is assigned" here and refuse the lot.
-  if (paths.every((p) => p.diverged)) return;
+  // SNAPSHOTS, so the diverged paths are simply absent rather than flagged — `daKeep`
+  // returns nothing for one. "Every path left by `throw`" is therefore "no paths at all":
+  // no instance ever escapes, so there is nothing to prove, and `daMerge`'s own fallback
+  // would answer "nothing is assigned" here and refuse the lot.
+  const paths = [...daKeep(flow, exit === "left"), ...rets];
+  if (paths.length === 0) return;
   const out = daMerge(paths, new Set<string>());
   const self = daSelfTy(fn);
   const cls = self === undefined ? "this" : classTag(self) ?? "this";
@@ -8982,7 +9027,7 @@ function checkDefiniteAssignment(body: Stmt[]): void {
       for (const f of fields.keys()) tracked = tracked.set(daField(f), fields.get(f) ?? "unknown");
       const flow = new Set<string>();
       //@@mutable
-      const myRets: DAFlow[] = [];
+      const myRets: string[][] = [];
       const exit = daBlock(nested as Stmt[], tracked, false, flow, [], [], myRets);
       if (fields.size > 0) daCheckCtorExit(fn, fields, flow, exit, myRets);
     }
