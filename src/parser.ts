@@ -3509,7 +3509,11 @@ class Parser {
         selfRecursive = true;
         resolvedFields.push({ key: f.key, ty: f.ty.split(selfMarker).join(typeRefTy(name)) as Ty });
       } else {
-        resolvedFields.push(f);
+        // A COPY on this arm too. `f` is a for-of binding, which borrows `allFields`'
+        // element — pushing it into a second array would make a second owner (NT1604).
+        // Both arms now build a record; only the `ty` differs, which is what the branch
+        // is about. `key` and `ty` are strings, so the copy is exact.
+        resolvedFields.push({ key: f.key, ty: f.ty });
       }
     }
     const objTy = `${name}${objectType(resolvedFields)}` as Ty; // class-tagged instance type
@@ -3522,7 +3526,6 @@ class Parser {
     // name, field type), and `this` has the class's own tagged instance type right here.
     if (selfRecursive) this.recTypes = this.recTypes.set(name, objTy);
     this.typeAliases = this.typeAliases.set(name, objTy); // uses of `name` as a type resolve to the instance shape
-    const thisParam: Param = { name: "this", annot: objTy };
     //@@mutable
     // `Stmt[]`, matching `hoistedFns` (which these are pushed into) and `mapTypesDeep`'s
     // parameter. A `FuncDecl[]` is NOT a `Stmt[]` here: the union's member carries
@@ -3537,10 +3540,14 @@ class Parser {
     // target's exact slot layout, so a literal omitting the optional fields is NT2001; an
     // ANNOTATION is a context the literal gets reshaped INTO (`retypeLiteral`), which is
     // what fills the omitted slots. Same program, and the spelling the checker supports.
+    // NOT one shared `thisParam`. Every lowered member takes the receiver as its first
+    // parameter, and a `Param` is a heap record — putting the same one into the
+    // constructor's list and then into each method's list moves it once per member
+    // (NT1601). Each site builds its own; the only thing they share is `objTy`, a string.
     //@@mutable
     const ctor: FuncDecl = {
       kind: "FuncDecl", name: `${name}.constructor`,
-      params: [thisParam, ...(ctorParams ?? [])], returnAnnot: "void", body: ctorBody,
+      params: [{ name: "this", annot: objTy }, ...(ctorParams ?? [])], returnAnnot: "void", body: ctorBody,
     };
     // A CLASS `@wrapper` wraps the CONSTRUCTOR: the thing being decorated is
     // `(instance, …ctorArgs) => instance` — nativets allocates the instance, the
@@ -3570,7 +3577,7 @@ class Parser {
       //@@mutable
       const fn: FuncDecl = {
         kind: "FuncDecl", name: `${name}.${m.name}`,
-        params: [thisParam, ...m.params], returnAnnot: m.returnAnnot, body: m.body,
+        params: [{ name: "this", annot: objTy }, ...m.params], returnAnnot: m.returnAnnot, body: m.body,
         // A GENERIC method is the same FuncDecl carrying `typeParams`, so the checker's
         // existing template registration (`declareGeneric`) picks it up with no special
         // case: `this` is simply its first parameter, and it is never generic.
@@ -3597,10 +3604,12 @@ class Parser {
     const unself = (t: Ty): Ty => (t.includes(selfMarker) ? (t.split(selfMarker).join(objTy) as Ty) : t);
     emitted = mapTypesDeep(emitted, unself);
     decorators = mapTypesDeep(decorators, unself);
-    // A LOOP, not `push(...emitted)`: a spread into a variadic call is NT1006, and the
-    // loop is what the spread means. `hoistedFns` is an accumulator field, so the push is
-    // the in-place one the array opt-in legalizes.
-    for (const f of emitted) this.hoistedFns.push(f);
+    // A BULK MOVE. The loop it replaces (`for (const f of emitted) this.hoistedFns.push(f)`)
+    // moved each statement out of a for-of binding, which borrows `emitted`'s element —
+    // NT1604. Spreading both into one array says the same thing and leaves one owner;
+    // `emitted` is dead after this. (`push(...emitted)` is still not the alternative — a
+    // spread into a variadic call is NT1006.)
+    this.hoistedFns = [...this.hoistedFns, ...emitted];
     // The decorator applications run WHERE THE CLASS WAS DECLARED (a module-level
     // `const`), so each wrapper is applied exactly ONCE — Python's `m = w(m)`, not a
     // per-call wrap. Function declarations hoist, so a decorator defined further down
@@ -3645,14 +3654,18 @@ class Parser {
         );
       }
     }
-    const inner: FuncDecl = { ...fn, name: `${fn.name}$inner` };
+    // The NAME is bound before the handoff. `emitted.push(inner)` moves the declaration, and
+    // the arrow below still has to call it by name — reading `inner.name` afterwards is a
+    // use of a moved value (NT1601). A string costs nothing and is what the arrow wanted.
+    const innerName = `${fn.name}$inner`;
+    const inner: FuncDecl = { ...fn, name: innerName };
     emitted.push(inner);
     // `(__self, …p) => C.m$inner(__self, …p)` — the method, bound to an explicit receiver.
     const names = fn.params.map((p, i) => (i === 0 ? "__self" : p.name));
     const arrow: Expr = {
       kind: "ArrowFunction",
       params: fn.params.map((p, i) => ({ name: names[i]!, annot: p.annot })),
-      body: { kind: "CallExpr", callee: this.ident(inner.name), args: names.map((n: string) => this.ident(n)) },
+      body: { kind: "CallExpr", callee: this.ident(innerName), args: names.map((n: string) => this.ident(n)) },
       exprBody: true,
     };
     // Bottom-up application: the decorator written CLOSEST to the method wraps first.
@@ -3912,14 +3925,18 @@ class Parser {
         if (v === "(") depth++;
         else if (v === ")") { depth--; if (depth === 0) break; }
       }
-      const after = this.toks[i + 1];
-      if (!after) return false;
-      if (after.value === "=>") return true;
+      // THE INDEX IS BOUNDS-TESTED, then read through. Binding `const after = this.toks[i+1]`
+      // moves the token out of the array (NT1605), and only its `value` was ever wanted.
+      // `if (!after)` said the same thing as the length test — the element is an object, so
+      // `undefined` (past the end) was the only falsy value it could take.
+      if (i + 1 >= this.toks.length) return false;
+      const afterValue = this.toks[i + 1]!.value;
+      if (afterValue === "=>") return true;
       // `(a): T => …` — an arrow with a RETURN-TYPE annotation. A trailing `:` alone is
       // not enough: `cond ? (t.slice(2) as Ty) : t` and `cond ? (x) : y` are ternary arms
       // that also end `) :`. Commit to the arrow grammar only when the parens really hold
       // a parameter list AND a top-level `=>` follows the annotation.
-      return after.value === ":" && this.parenHoldsParams(i) && this.annotEndsInArrow(i + 2);
+      return afterValue === ":" && this.parenHoldsParams(i) && this.annotEndsInArrow(i + 2);
     }
     return false;
   }
@@ -3932,16 +3949,20 @@ class Parser {
    * `a === b` diverges on its very next token.
    */
   private parenHoldsParams(end: number): boolean {
-    const first = this.toks[this.pos + 1];
-    if (!first || this.pos + 1 >= end) return true; // `()` — the empty parameter list
+    // Read THROUGH the indices — binding either token moves it out of the array (NT1605).
+    // `!first` / `!!nxt` were the past-the-end tests, and the elements are objects, so
+    // `undefined` was the only falsy value either could take: the length tests say it
+    // exactly, and they now also come BEFORE the read rather than after it.
+    if (this.pos + 1 >= this.toks.length || this.pos + 1 >= end) return true; // `()` — empty list
+    const firstValue = this.toks[this.pos + 1]!.value;
     // `@@` starts a parameter ATTRIBUTE (`(//@@mutable\n out: T) => …`), so it can only be
     // a parameter list — an expression never begins with it. Without this the arrow was
     // not even RECOGNIZED as one, and the attribute failed at `Unexpected token '@@'`
     // rather than anywhere near the code that reads it.
-    if (first.value === "..." || first.value === "[" || first.value === "{" || first.value === "@@") return true;
-    if (first.type !== "ident") return false;
-    const nxt = this.toks[this.pos + 2];
-    return !!nxt && [",", ")", ":", "?", "="].includes(nxt.value);
+    if (firstValue === "..." || firstValue === "[" || firstValue === "{" || firstValue === "@@") return true;
+    if (this.toks[this.pos + 1]!.type !== "ident") return false;
+    if (this.pos + 2 >= this.toks.length) return false;
+    return [",", ")", ":", "?", "="].includes(this.toks[this.pos + 2]!.value);
   }
 
   /** Scan a return-type annotation from `i` for the `=>` that makes it an arrow. In TYPE
@@ -4018,21 +4039,6 @@ class Parser {
     // Which parameters are `(…) => Promise<T>` — recorded against the arrow NODE, since an
     // arrow has no name of its own until parseDeclarator binds it (see promiseParamsByFn).
     const promiseIdx = arrowPromiseIdx;
-    // STAMPED on the arrow — see `ArrowFunction.promiseParams`.
-    const mk = (
-      //@@mutable
-      a: Expr
-    ): Expr => {
-      // A NESTED `if`, not `promiseIdx.length && a.kind === "ArrowFunction"`. The tag test
-      // narrows `a` to the `ArrowFunction` member — which is what makes the field store
-      // well-defined, since `promiseParams` is NOT a field every `Expr` member shares — and
-      // the narrowing has to reach the STORE. Splitting the conjunction is the spelling
-      // that guarantees it.
-      if (promiseIdx.length > 0) {
-        if (a.kind === "ArrowFunction") a.promiseParams = promiseIdx;
-      }
-      return a;
-    };
     let retAsyncFn = false;
     // `(x): T => …` — the DECLARED return type. This used to keep only `asyncFn` and drop
     // `ty` on the floor, which is why an arrow was the one function form whose declared
@@ -4044,12 +4050,42 @@ class Parser {
     this.returnsAsyncFnStack.push(retAsyncFn);
     this.asyncParamScopes.push(arrowPromiseNames);
     try {
-      if (this.at("{")) return mk({ kind: "ArrowFunction", params, stmts: [...prelude, ...this.parseBlock()], exprBody: false, retAnnot, loc: arrowLoc });
-      const body = this.parseAssign();
-      // A pattern parameter needs statements to bind its names, so an expression body
-      // becomes a block: `([a, b]) => a + b` ≡ `(__d0) => { const a = …, b = …; return a + b; }`.
-      if (prelude.length) return mk({ kind: "ArrowFunction", params, stmts: [...prelude, { kind: "ReturnStmt", argument: body }], exprBody: false, retAnnot , loc: arrowLoc });
-      return mk({ kind: "ArrowFunction", params, body, exprBody: true, retAnnot, loc: arrowLoc });
+      // ONE literal; the branches choose only WHICH body it carries. This was three
+      // `return mk(…)` sites, and `mk` was a bound arrow that took the node as a PARAMETER
+      // — a borrow — stamped `promiseParams` through it (NT1607) and handed it back
+      // (NT1604). Built here, the node is owned by this frame and the stamp is an ordinary
+      // field of the literal, which is also where `promiseParams` reads most plainly.
+      //
+      // `body?` and `stmts?` are both optional and `exprBody` is the discriminator that
+      // says which one is set (src/ast.ts) — so naming both, with one `undefined`, is the
+      // shape the interface already describes.
+      let stmts: Stmt[] | undefined;
+      let body: Expr | undefined;
+      if (this.at("{")) {
+        stmts = [...prelude, ...this.parseBlock()];
+      } else {
+        const e = this.parseAssign();
+        // A pattern parameter needs statements to bind its names, so an expression body
+        // becomes a block: `([a, b]) => a + b` ≡ `(__d0) => { const a = …, b = …; return a + b; }`.
+        if (prelude.length) {
+          // ANNOTATED into `Stmt` first. Inside the old `mk({… stmts: […] })` literal the
+          // array had the field's declared type as its context and the bare literal was
+          // reshaped into it; assigned to a local it does not, and the array's elements
+          // (spread `Stmt`s plus one literal) then "must share a type" — NT2001, with the
+          // whole `Stmt` union printed out.
+          const ret: Stmt = { kind: "ReturnStmt", argument: e };
+          stmts = [...prelude, ret];
+        } else {
+          body = e;
+        }
+      }
+      // ASKED BEFORE THE LITERAL. `stmts` is moved into the node by the shorthand below, so
+      // `exprBody: stmts === undefined` written inline would read it after the move.
+      const isExprBody = stmts === undefined;
+      return {
+        kind: "ArrowFunction", params, body, stmts, exprBody: isExprBody, retAnnot, loc: arrowLoc,
+        promiseParams: promiseIdx.length > 0 ? promiseIdx : undefined,
+      };
     } finally { this.returnsAsyncFnStack.pop(); this.asyncParamScopes.pop(); }
   }
 
@@ -4074,14 +4110,18 @@ class Parser {
       // annotations become `#T` markers — the checker then prefers the CONTEXTUAL type
       // where there is one, and otherwise erases the marker to `number` (pre-M3 behavior).
       const tps = this.parseTypeParamList();
-      if (tps.length) this.typeParamScopes.push(tps);
+      // A COPY onto the stack, and the length asked ONCE — the same two adjustments
+      // `parseFunction` needed. The `finally` runs after the push has taken the array, so
+      // `tps.length` there is a read of a moved value (NT1601). The names are strings.
+      const hasTps = tps.length > 0;
+      if (hasTps) this.typeParamScopes.push([...tps]);
       let arrow: Expr;
-      try { arrow = this.parseArrow(); } finally { if (tps.length) this.typeParamScopes.pop(); }
+      try { arrow = this.parseArrow(); } finally { if (hasTps) this.typeParamScopes.pop(); }
       // Split, and bound to a CONST first. `arrow` is a `let` assigned inside a `try`, so
       // a tag test on it inside an `&&` does not narrow — the read of `.params` below was
       // `Property 'params' does not exist on <the Expr union>`. A const alias narrows.
       const arrowed = arrow;
-      if (tps.length > 0 && arrowed.kind === "ArrowFunction") {
+      if (hasTps && arrowed.kind === "ArrowFunction") {
         // A marker is only meaningful on the arrow's OWN parameter annotations (where the
         // checker substitutes the contextual type). Everywhere else inside the arrow there
         // is nothing to resolve it against, so erase to `number` right here — a `#T` must
@@ -4102,7 +4142,7 @@ class Parser {
         // `@@mutable` binding may store its fields, so the two positions that need restoring
         // are simply assigned.
         //@@mutable
-        const erased = mapTypesDeepExpr(arrow, eraseTypeParams);
+        const erased = mapTypesDeepExpr(arrowed, eraseTypeParams);
         if (erased.kind === "ArrowFunction") {
           erased.params = erased.params.map((p: Param, i: number): Param =>
             (own[i] !== undefined ? { ...p, annot: own[i] } : p));
@@ -4110,9 +4150,14 @@ class Parser {
           // second stays `?Ustring`, so the branches would differ (NT2001).
           erased.retAnnot = ownRet ?? erased.retAnnot;
         }
-        arrow = erased;
+        // RETURNED FROM THE BRANCH, with an explicit `else` below. `const arrowed = arrow`
+        // moves, so `arrow` is moved-from from here on — reading it again (to pass to the
+        // walker, or to return on the path that skips this block) is NT1601. Each branch
+        // now hands out the binding that actually owns the node.
+        return erased;
+      } else {
+        return arrowed;
       }
-      return arrow;
     }
     if (this.looksLikeArrow()) return this.parseArrow();
     const left = this.parsePipe();
@@ -4302,9 +4347,14 @@ class Parser {
       if (!info || info.prec < minPrec) break;
       const op = this.next().value;
       const right = this.parseBinary(info.right ? info.prec : info.prec + 1);
-      left = info.logical
-        ? { kind: "LogicalExpr", op: op as "&&" | "||" | "??", left, right }
-        : { kind: "BinaryExpr", op: op as BinaryOp, left, right };
+      // `if`/`else`, not a `?:`. Both arms consume `left` and `right`, and a ternary arm in
+      // a consuming position moves (docs/divergences.md) — so one operand looked moved
+      // twice. Two branches make the exclusivity visible; the nodes are otherwise identical.
+      if (info.logical) {
+        left = { kind: "LogicalExpr", op: op as "&&" | "||" | "??", left, right };
+      } else {
+        left = { kind: "BinaryExpr", op: op as BinaryOp, left, right };
+      }
     }
     return left;
   }
