@@ -4790,7 +4790,13 @@ class Parser {
     while (i < raw.length) {
       if (raw[i] === "\\") {
         // The LEXER's decoder, not a second smaller one — see `decodeEscapeAt`.
-        const { text, next } = decodeEscapeAt(raw, i, tok.line, tok.col);
+        const d = decodeEscapeAt(raw, i, tok.line, tok.col);
+        // The decoder REPORTS its six failures rather than throwing them (src/lexer.ts):
+        // it is called from two frames, neither inside a `try`, which is NT1004. Raised
+        // here, next to `buildTemplate`'s own refusal below, so a template's escape errors
+        // read exactly as they did — pinned by text in test/lexer-errors.test.ts.
+        if (d.error !== undefined) throw parseError(d.error);
+        const text = d.text, next = d.next;
         // NT1705, the same rule `tokenize` puts on a quoted string: a template's escapes
         // are decoded here, so this is the only place a `\0`/`\x00` inside one is visible.
         if (text.indexOf(nul) >= 0) throw nulLiteral("this template literal", tok.line, tok.col);

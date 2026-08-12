@@ -31,7 +31,18 @@ export interface Token {
  * `//@@mutable` is a comment to TypeScript, so bun runs this file unchanged.
  */
 //@@mutable
-interface LexState { i: number; line: number; col: number }
+/**
+ * `err` is the FUNNEL for the two nested scanners. `scanQuoted` and `scanTemplateBody` are
+ * arrows called from inside `lex`, not from inside a `try`, so a `throw` in either may not
+ * cross that frame (NT1004) — the refusal that kept `src/parser.ts` from reaching IR. They
+ * record the message here instead and `lex` raises it, where a throw IS legal because
+ * `parser.ts`'s `tokenize` calls `lex` inside a `try`.
+ *
+ * It rides on the cursor because they already share it — no new plumbing, and one place to
+ * check. Once set, both scanners stop and return what they have; the value is discarded at
+ * the raise, so the partial result never reaches a token.
+ */
+interface LexState { i: number; line: number; col: number; err?: string }
 
 const PUNCT_4 = [">>>="];
 const PUNCT_3 = ["===", "!==", ">>>", "...", "<<=", ">>=", "**="];
@@ -203,7 +214,21 @@ function escapeChar(e: string): string {
  * the lane that introduced the tuple re-checked its work by comparing NT codes, which
  * were NT2001 before and after, so its own check passed while the gap widened.
  */
-export interface DecodedEscape { text: string; next: number; }
+/**
+ * `error` is REPORTED, not thrown — the funnel that keeps `decodeEscapeAt` compilable.
+ *
+ * Its six failures used to `throw new LexError(...)`, and this function is called from
+ * inside `lex` and again from `parser.ts`'s `buildTemplate`, in neither case inside a
+ * `try`. A throw may cross exactly ONE frame here, and only when EVERY call site of its
+ * function catches (NT1004) — so those six throws are what stopped `src/parser.ts` from
+ * reaching IR, and they are the reason this reports instead.
+ *
+ * Both callers raise it immediately, so the message and position a program sees are
+ * unchanged — `test/lexer-errors.test.ts` pins all six by exact text, in BOTH carriers.
+ * When `error` is set, `text` is empty and `next` steps one character so a caller that
+ * ignored it could not spin; no caller does.
+ */
+export interface DecodedEscape { text: string; next: number; error?: string; }
 
 export function decodeEscapeAt(raw: string, i: number, line: number, col: number): DecodedEscape {
   // `i + 1 < raw.length`, not `raw[i + 1] ?? ""`. The `??` was a DEAD GUARD: a trailing
@@ -236,18 +261,18 @@ export function decodeEscapeAt(raw: string, i: number, line: number, col: number
   // is the NUL escape it has always been — refused downstream as NT1705, for a different
   // reason and with a different message.
   if (e >= "1" && e <= "7") {
-    throw new LexError(`Octal escape sequences are not allowed at ${line}:${col}`);
+    return { text: "", next: i + 1, error: `Octal escape sequences are not allowed at ${line}:${col}` };
   }
   if (e === "0") {
     const d = raw[i + 2] ?? "";
-    if (d >= "0" && d <= "9") throw new LexError(`Octal escape sequences are not allowed at ${line}:${col}`);
+    if (d >= "0" && d <= "9") return { text: "", next: i + 1, error: `Octal escape sequences are not allowed at ${line}:${col}` };
   }
   if (e === "x") {
     // `\xHH` — two-hex-digit byte escape (e.g. `\x1b` = ESC), as node does. Only a
     // LOWERCASE `x` starts one: node reads `\X00` as the three characters "X00".
     const h = (raw[i + 2] ?? "") + (raw[i + 3] ?? "");
     if (h.length !== 2 || !isHexDigit(h[0]!) || !isHexDigit(h[1]!)) {
-      throw new LexError(`Invalid \\x escape at ${line}:${col}`);
+      return { text: "", next: i + 1, error: `Invalid \\x escape at ${line}:${col}` };
     }
     return { text: String.fromCharCode(parseInt(h, 16)), next: i + 4 };
   }
@@ -265,15 +290,15 @@ export function decodeEscapeAt(raw: string, i: number, line: number, col: number
       let hex = "";
       while (j < raw.length && raw[j] !== "}") { hex += raw[j]; j++; }
       if (raw[j] !== "}" || hex.length === 0 || !allHexDigits(hex)) {
-        throw new LexError(`Invalid \\u{…} escape at ${line}:${col}`);
+        return { text: "", next: i + 1, error: `Invalid \\u{…} escape at ${line}:${col}` };
       }
       const cp = parseInt(hex, 16);
       // > 0x10FFFF is "undefined Unicode code-point" — a SyntaxError, not a clamp.
-      if (cp > 0x10ffff) throw new LexError(`Invalid \\u{…} escape at ${line}:${col}: ${hex} is above 10FFFF`);
+      if (cp > 0x10ffff) return { text: "", next: i + 1, error: `Invalid \\u{…} escape at ${line}:${col}: ${hex} is above 10FFFF` };
       return { text: String.fromCodePoint(cp), next: j + 1 };
     }
     const h = (raw[i + 2] ?? "") + (raw[i + 3] ?? "") + (raw[i + 4] ?? "") + (raw[i + 5] ?? "");
-    if (h.length !== 4 || !allHexDigits(h)) throw new LexError(`Invalid \\u escape at ${line}:${col}`);
+    if (h.length !== 4 || !allHexDigits(h)) return { text: "", next: i + 1, error: `Invalid \\u escape at ${line}:${col}` };
     // fromCharCode, not fromCodePoint: `\uHHHH` names a UTF-16 CODE UNIT, so an adjacent
     // pair — a high-surrogate escape followed by a low-surrogate one — has to combine
     // into ONE astral character exactly as it does in node, which it does because both
@@ -345,7 +370,7 @@ export function lex(source: string): Token[] {
     }
     // `st.i >= source.length ||` FIRST — at end of input the read panicked one statement
     // BEFORE the `LexError` it was written to raise, so this is the ERROR PATH breaking.
-    if (st.i >= source.length || source[st.i] !== q) throw new LexError(`Unterminated string at ${sl}:${sc}`);
+    if (st.i >= source.length || source[st.i] !== q) { st.err = `Unterminated string at ${sl}:${sc}`; return out; }
     advance(1);
     return out + q;
   };
@@ -373,10 +398,12 @@ export function lex(source: string): Token[] {
     let frames: number[] = [-1];
     while (frames.length > 0) {
       const top = frames[frames.length - 1]!;
-      if (st.i >= source.length)
-        throw new LexError(top === -1
+      if (st.i >= source.length) {
+        st.err = top === -1
           ? `Unterminated template at ${sl}:${sc}`
-          : `Unterminated template substitution at ${sl}:${sc}`);
+          : `Unterminated template substitution at ${sl}:${sc}`;
+        return raw;
+      }
       const ch = source[st.i]!;
       if (ch === "\\") { raw += ch; advance(1); raw += st.i < source.length ? source[st.i]! : ""; advance(1); continue; }
       if (top === -1) {
@@ -394,7 +421,10 @@ export function lex(source: string): Token[] {
       }
       // a substitution: braces nest, a backtick opens a nested template body
       if (ch === "`") { raw += ch; advance(1); frames = [...frames, -1]; continue; }
-      if (ch === '"' || ch === "'") { raw += scanQuoted(ch, sl, sc); continue; }
+      // `scanQuoted` reports into `st.err` rather than throwing (see `LexState`), so its
+      // failure has to end this loop too — otherwise an unterminated string inside a
+      // template would be swallowed and scanning would run on past it.
+      if (ch === '"' || ch === "'") { raw += scanQuoted(ch, sl, sc); if (st.err !== undefined) return raw; continue; }
       if (ch === "{") frames = [...frames.slice(0, frames.length - 1), top + 1];
       else if (ch === "}") {
         if (top === 1) { advance(1); raw += "}"; frames = frames.slice(0, frames.length - 1); continue; }
@@ -497,7 +527,12 @@ export function lex(source: string): Token[] {
       let s = "";
       while (st.i < source.length && source[st.i] !== quote) {
         if (source[st.i] === "\\") {
-          const { text, next } = decodeEscapeAt(source, st.i, st.line, st.col);
+          // RAISED HERE, in `lex`, where a throw is legal: `parser.ts`'s `tokenize` calls
+          // `lex` inside a `try`, so it crosses exactly one frame. That is the whole point
+          // of the decoder reporting rather than throwing.
+          const d = decodeEscapeAt(source, st.i, st.line, st.col);
+          if (d.error !== undefined) throw new LexError(d.error);
+          const text = d.text, next = d.next;
           s += text;
           advance(next - st.i);
         } else {
@@ -524,6 +559,15 @@ export function lex(source: string): Token[] {
     if (c === "`") {
       advance(1);
       const raw = scanTemplateBody(sl, sc);
+      // THE RAISE. Both nested scanners funnel here; a throw in `lex` is legal because
+      // `tokenize` calls it inside a `try`, so it crosses exactly one frame.
+      //
+      // Bound to a LOCAL first: the guard has to narrow the thing that is READ, and a field
+      // of another object is not a stable access path here — `new LexError(st.err)` is
+      // `expects string, got ?Ustring` even directly under the test (docs/self-hosting.md,
+      // the same shape as `sub.blockedOn`).
+      const err = st.err;
+      if (err !== undefined) throw new LexError(err);
       advance(1); // closing backtick
       tokens.push({ type: "template", value: raw, line: sl, col: sc });
       continue;
