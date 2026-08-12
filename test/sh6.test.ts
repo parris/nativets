@@ -558,7 +558,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // Both rows moved to their real blockers, and the blame column is the interesting part:
   // coverage.ts is clean on its own and inherits ast.ts's, exactly as this file predicted
   // below; coverage-preprocess.ts finally has one of its OWN.
-  "coverage.ts": { rung: 0, code: "NT1606", blame: "modules.ts" },
+  "coverage.ts": { rung: 0, code: "NT1002", blame: "checker.ts" },
   // Still inherits checker.ts's blocker, and has now followed it through THREE codes —
   // NT1009 -> NT1606 -> NT1027 — without ever having a blocker of its own under the link.
   // The long-standing "ownership.ts is credited with checker.ts's problem" attribution
@@ -576,7 +576,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // column, and clearing it makes that column BLIND: what it reports now is the unlinked-import
   // artifact (see the ratchet baseline). Linked, it still inherits, as it always has.
   "ownership.ts": { rung: 0, code: "NT1002", blame: "checker.ts" }, // inherited — see checker.ts
-  "driver.ts": { rung: 0, code: "NT1606", blame: "modules.ts" },
+  "driver.ts": { rung: 0, code: "NT1002", blame: "checker.ts" },
   // Stage-1's entry point now stops on its OWN code for the first time: calling the async
   // `buildBinary` without `await`. Not a dependency's blocker.
   //
@@ -605,14 +605,20 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // reflective `mapTypesDeep`. NT2001 is now EMPTY tree-wide — cli.ts was its last holder,
   // and it only ever held it because this lane had not landed yet. Sixth time a merge here
   // produced a frontier neither side could have computed from its own diff.
-  "cli.ts": { rung: 0, code: "NT1606", blame: "modules.ts" },
+  "cli.ts": { rung: 0, code: "NT1002", blame: "checker.ts" },
   // Followed parser.ts through the link: when parser.ts stopped blaming itself, the three
   // modules that inherited its `?.[]` all moved to ast.ts's NT1030 together.
   // Followed ast.ts off the entries form onto ast.ts's `HOST_MODULES` Record literal.
   // Followed lexer.ts off `.push` onto lexer.ts's NT2001. Its own accumulators are pushed
   // from inside CAPTURING arrows (`const walk = (list) => { out.push(…) }`), which the
   // accumulator opt-in refuses — see the closure rule in src/ownership.ts.
-  "modules.ts": { rung: 0, code: "NT1606", blame: "self" },
+  // Its own accumulators are CLEAR now. The `.push` sites that sat here were refused by
+  // the closure rule, not the array rule: `moduleOrder`'s DFS state is captured by a
+  // self-recursive arrow (NT1607), and so was `topLevelNames`' list — which was declared
+  // INSIDE the arrow and still refused, because a self-recursive arrow carries an env.
+  // The DFS state is an `@@mutable` record with field rebinds; `topLevelNames`' walk is a
+  // top-level function. modules.ts now inherits parser.ts's NT1004 and nothing of its own.
+  "modules.ts": { rung: 0, code: "NT1004", blame: "parser.ts" },
   // `line++` inside `advance` — a write to a captured binding, the SAME blocker lexer.ts
   // sat on for two rounds. Its own, not inherited: this module is now a true leaf, since
   // the type-only import cycle that used to mask it moved out of the way.
@@ -750,7 +756,9 @@ const STAGE1: Entry = { file: "cli.ts", path: () => pathOf("cli.ts"), argv: () =
 // (`unionCommonField`). Stage-1 inherits ast.ts's `exprLoc` either way: the blocker moved
 // 22 lines down that one function, from the `e.left` read to the `.map` over its own
 // recursive calls. Still rung 0, still nine modules — the conjunction, again.
-const STAGE1_BASELINE: { rung: Rung; code: string } = { rung: 0, code: "NT1606" };
+// NT1606 -> NT1002: stage-1 stopped inheriting the linker's `.push` sites (modules.ts is
+// clear of its own) and now reaches `structuredClone` of a recursive type, in checker.ts.
+const STAGE1_BASELINE: { rung: Rung; code: string } = { rung: 0, code: "NT1002" };
 
 describe("SH6: the instrument itself — the upper rungs are exercised, not dead code", () => {
   /**
@@ -1422,7 +1430,15 @@ describe("SH6: differential self-compilation (bun-run compiler is the oracle)", 
       // parameter` a LOCATION to find, since it named `n` at three sites and pointed at
       // none — seven conditional `program.<field> = …` writes rebuilt as one construction,
       // and a method call on a nullable FIELD receiver.
-      expect(m.code).toBe("NT1606");
+      // ...and NT1606 is gone from stage-1's path. The `.push` sites the linker still held
+      // were refused by the CLOSURE rule, not the array rule — `moduleOrder`'s DFS state is
+      // captured by a self-recursive arrow (NT1607), which the `//@@mutable` accumulator
+      // opt-in does not answer. An `@@mutable` record with field rebinds does, and
+      // `topLevelNames`' walk became a top-level function because a self-recursive arrow
+      // carries an env even over a list declared inside it. Stage-1 now reaches NT1002,
+      // `structuredClone` of a recursive type, in checker.ts — a fifth statement of this
+      // file's recurring lesson: clearing the largest term reveals the next one.
+      expect(m.code).toBe("NT1002");
       expect(m.error.length).toBeGreaterThan(0);
       return;
     }

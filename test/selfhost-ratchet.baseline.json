@@ -1,7 +1,7 @@
 {
   "recordedAt": {
     "date": "2026-08-12",
-    "rev": "a43594a"
+    "rev": "17dfffe"
   },
   "modules": {
     "ast.ts": {
@@ -40,8 +40,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] arrays are immutable: `stack.push` would mutate the array in place at L:C"
+        "code": "NT1002",
+        "message": "[NT1002] structuredClone of the recursive type {kind:string,name:string,params:@_nts0_m2_Param[],returnAnnot:?Ustring,body:@_nts0_m2_Stmt[],endDrops:?Ustring[],typeParams:undefined,copyThis:?Uboolean,…"
       }
     },
     "codegen.ts": {
@@ -80,8 +80,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] arrays are immutable: `stack.push` would mutate the array in place at L:C"
+        "code": "NT1002",
+        "message": "[NT1002] structuredClone of the recursive type {kind:string,name:string,params:@_nts0_m0_Param[],returnAnnot:?Ustring,body:@_nts0_m0_Stmt[],endDrops:?Ustring[],typeParams:undefined,copyThis:?Uboolean,…"
       }
     },
     "diagnostics.ts": {
@@ -107,12 +107,12 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] arrays are immutable: `stack.push` would mutate the array in place at L:C"
+        "code": "NT1002",
+        "message": "[NT1002] structuredClone of the recursive type {kind:string,name:string,params:@_nts0_m2_Param[],returnAnnot:?Ustring,body:@_nts0_m2_Stmt[],endDrops:?Ustring[],typeParams:undefined,copyThis:?Uboolean,…"
       }
     },
     "lexer.ts": {
-      "sha256": "4d9978f9cb1bc5a0",
+      "sha256": "7d814e0b98a80f08",
       "standalone": {
         "stage": "clear",
         "code": "",
@@ -125,16 +125,16 @@
       }
     },
     "modules.ts": {
-      "sha256": "ea564e080a4a4ca7",
+      "sha256": "9e2b1bdf374dad86",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] Property 'kind' does not exist on number at L:C"
+        "message": "[NT2001] 'rewriteTags' arg 0 expects string, got number at L:C"
       },
       "linked": {
-        "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] arrays are immutable: `stack.push` would mutate the array in place at L:C"
+        "stage": "codegen",
+        "code": "NT1004",
+        "message": "[NT1004] `throw` that is not inside a `try` in the same function is not supported yet at L:C"
       }
     },
     "ownership.ts": {
@@ -152,7 +152,7 @@
       }
     },
     "parser.ts": {
-      "sha256": "4292581422dfe376",
+      "sha256": "6f1acdf13aab6896",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
