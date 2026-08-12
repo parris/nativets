@@ -2,10 +2,12 @@
  * EVERY WAY THE LEXER REFUSES A PROGRAM — pinned by MESSAGE, not just by code.
  *
  * These exist to guard a refactor rather than to describe a feature. `src/lexer.ts` raises
- * eleven `LexError`s, and six of them are in `decodeEscapeAt` — a function called from
- * inside `lex` and again from `parser.ts`'s `buildTemplate`, in neither case inside a
- * `try`. That is `NT1004` (a throw may cross exactly ONE frame, and only when every call
- * site of its function catches), and it is what stops `src/parser.ts` from reaching IR:
+ * eleven `LexError`s, and asking the project's own parser which FRAME each one sits in
+ * splits them 6 / 2 / 3: six in `decodeEscapeAt`, two in the arrows `scanQuoted` and
+ * `scanTemplateBody`, and three directly in `lex`. Only the first eight are a problem —
+ * `lex`'s own three are legal, because its one caller (`parser.ts`'s `tokenize`) wraps it
+ * in a `try` and a throw may cross exactly ONE frame. That is `NT1004`, and the eight are
+ * what stopped `src/parser.ts` from reaching IR:
  *
  *     error[NT1004]: `throw` that is not inside a `try` in the same function
  *          --> src/lexer.ts:239:5
@@ -16,6 +18,11 @@
  * silently drop an error path, turning a refusal into a WRONG ANSWER (an unterminated
  * string that lexes to something, an invalid escape that decodes to garbage). So every
  * path is nailed down first.
+ *
+ * (The 6/2/3 split is worth stating because the first count was wrong. Brace-depth scanning
+ * is defeated by braces inside a LEXER'S OWN string literals, and it reported "11 throws in
+ * 3 functions" with three of them in the wrong frames — making an eight-site job look like
+ * eleven. `test/throw-census.ts` asks the parser instead.)
  *
  * WHY MESSAGES AND NOT JUST CODES. All eleven surface as `NT0001`, so a code assertion
  * cannot tell "the octal guard still fires" from "some other guard fired instead" — and a
@@ -41,7 +48,9 @@ function refusal(source: string): { code: string; message: string } {
   try {
     sourceToIR(source);
   } catch (e) {
-    if (e instanceof NTError) return { code: e.diag.code, message: e.diag.message.split(NL)[0] };
+    // `!` because `split` always yields at least one element — never a length-1 index, so
+    // this is not the `xs[xs.length - 1]` shape `test/no-index-last.test.ts` lints for.
+    if (e instanceof NTError) return { code: e.diag.code, message: e.diag.message.split(NL)[0]! };
     throw e;
   }
   throw new Error("expected a refusal, but the source compiled");
