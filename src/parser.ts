@@ -1612,6 +1612,12 @@ class Parser {
   // (`"a" | "b" | "c"` → string); and a DISCRIMINATED union of object types (SH2).
   // Anything else is rejected with an NYI code (never miscompiled).
   private parseTypeInner(): Ty {
+    // WHERE THE TYPE STARTS, kept for the refusal at the bottom. A general-union refusal
+    // used to carry no span at all, so `NT1009: general union type 'number | null |
+    // undefined'` named neither a file nor a line — and in a multi-module build that is
+    // the whole search. Three diagnostics have cost real time this way now (the
+    // object-literal shorthand's `Identifier`, `ThrowStmt`, and this).
+    const start = this.peek();
     if (this.at("|")) this.next(); // leading union bar: `type X = | A | B`
     //@@mutable
     const arms: Ty[] = [this.parseTypeAtom()];
@@ -1653,7 +1659,8 @@ class Parser {
       // actually tell apart are accepted — see `generalUnionArmsOk`.
       if (uniq.every((a) => isGeneralUnionArm(a)) && new Set(uniq.map((a) => generalUnionArmTypeof(a))).size === uniq.length) return makeGeneralUnionTy(uniq);
     }
-    throw nyi(NYI.OPTIONAL_CHAIN, `general union type '${arms.map((a) => widenLiteralTys(a)).join(sawIntersect ? " & " : " | ")}' (only 'T | undefined' / 'T | null', a DISCRIMINATED union of object types — a common literal-typed tag field at the same position in every member — and a general union of arms \`typeof\` can tell apart are supported)`);
+    throw nyi(NYI.OPTIONAL_CHAIN, `general union type '${arms.map((a) => widenLiteralTys(a)).join(sawIntersect ? " & " : " | ")}' (only 'T | undefined' / 'T | null', a DISCRIMINATED union of object types — a common literal-typed tag field at the same position in every member — and a general union of arms \`typeof\` can tell apart are supported)`,
+      undefined, { line: start.line, col: start.col, file: this.file });
   }
 
   /**

@@ -80,9 +80,22 @@ function fixtureFiles(dir: string, limit: number): string[] {
   return out;
 }
 
-/** `name@line:col` for every read, sorted — a comparable rendering of one walker's answer. */
-function render(m: Map<string, { line: number; col: number } | undefined>): string[] {
-  return [...m.entries()]
+/**
+ * `name@line:col` for every read, FIRST OCCURRENCE PER NAME, sorted — a comparable
+ * rendering of either walker's answer.
+ *
+ * The two shapes differ deliberately and this is where they are reconciled. The oracle
+ * builds a `Map` and keeps the first loc per key; the typed walker appends to a list and
+ * keeps duplicates, because `Map<string, Loc | undefined>` is NT1014 here (a nullable
+ * OBJECT value) — a refusal the oracle was only escaping by never being compiled. Reducing
+ * both to first-occurrence-per-name compares exactly what `daUse` consumes: it throws on
+ * the first unassigned read, so a later duplicate can never change an answer.
+ */
+function render(m: Map<string, { line: number; col: number } | undefined> | { name: string; loc?: { line: number; col: number } }[]): string[] {
+  const first = new Map<string, { line: number; col: number } | undefined>();
+  if (Array.isArray(m)) { for (const r of m) if (!first.has(r.name)) first.set(r.name, r.loc); }
+  else { for (const [k, v] of m) if (!first.has(k)) first.set(k, v); }
+  return [...first.entries()]
     .map(([k, v]) => `${k}@${v === undefined ? "-" : `${v.line}:${v.col}`}`)
     .sort();
 }

@@ -8317,23 +8317,35 @@ type DATracked = Map<string, Ty | "unknown">;
  * test/da-reads-typed.test.ts runs both walkers over every fixture in the corpus and
  * asserts they find the SAME reads, with the reflective one kept as the oracle.
  */
-function daRecord(out: Map<string, Loc | undefined>, name: string, loc: Loc | undefined): Map<string, Loc | undefined> {
-  return out.has(name) ? out : out.set(name, loc);
+/**
+ * One read: the name, and where it was read. A RECORD ARRAY, not a `Map<string, Loc>` —
+ * a Map whose values are a nullable OBJECT is NT1014 here, and that was true of the
+ * reflective walker's `DaRead[]` too; it was simply masked behind
+ * NT1011 and surfaced the moment the walker was typed.
+ *
+ * Duplicates are kept rather than deduplicated. `daUse` throws on the FIRST unassigned
+ * read it finds, so the diagnostic still points at the first occurrence — which is exactly
+ * what the Map's keep-the-first-key behaviour bought — and an append needs no lookup.
+ */
+interface DaRead { name: string; loc?: Loc }
+
+function daRecord(out: DaRead[], name: string, loc: Loc | undefined): DaRead[] {
+  return [...out, { name, loc }];
 }
 
-function daReadsExprs(xs: Expr[], out: Map<string, Loc | undefined>): Map<string, Loc | undefined> {
+function daReadsExprs(xs: Expr[], out: DaRead[]): DaRead[] {
   let m = out;
   for (const x of xs) m = daReadsExpr(x, m);
   return m;
 }
 
-function daReadsStmts(xs: Stmt[], out: Map<string, Loc | undefined>): Map<string, Loc | undefined> {
+function daReadsStmts(xs: Stmt[], out: DaRead[]): DaRead[] {
   let m = out;
   for (const x of xs) m = daReadsStmt(x, m);
   return m;
 }
 
-function daReadsExpr(e: Expr, out: Map<string, Loc | undefined>): Map<string, Loc | undefined> {
+function daReadsExpr(e: Expr, out: DaRead[]): DaRead[] {
   switch (e.kind) {
     // Leaves. One arm each, matching `walkExprChildren` — a shared fallthrough label would
     // not narrow `e`, and these are spelled the same way there for the same reason.
@@ -8398,7 +8410,7 @@ function daReadsExpr(e: Expr, out: Map<string, Loc | undefined>): Map<string, Lo
   }
 }
 
-function daReadsStmt(s: Stmt, out: Map<string, Loc | undefined>): Map<string, Loc | undefined> {
+function daReadsStmt(s: Stmt, out: DaRead[]): DaRead[] {
   switch (s.kind) {
     case "VarDecl": {
       let m = out;
@@ -8455,19 +8467,26 @@ function daReadsStmt(s: Stmt, out: Map<string, Loc | undefined>): Map<string, Lo
  * it against the reflective walker it replaced — which now lives IN that test, since `test/`
  * is outside the self-hosting surface and `src/` is not. An equivalence claim nobody can
  * run is not one, and the oracle is the thing being replaced. */
-export function daReadsTypedForTest(s: Stmt): Map<string, Loc | undefined> {
-  return daReadsStmt(s, new Map<string, Loc | undefined>());
+export function daReadsTypedForTest(s: Stmt): DaRead[] {
+  return daReadsStmt(s, []);
 }
 
 /** Refuse every read in `e` of a tracked binding not yet proven assigned. */
-function daUse(e: Expr | null | undefined, tracked: DATracked | null, flow: DAFlow): void {
+function daUse(e: Expr | null, tracked: DATracked | null, flow: DAFlow): void {
   if (tracked === null) return; // shape-only mode: nothing is tracked, so nothing to refuse
-  if (e === null || e === undefined) return;
-  // TYPED, and the map is THREADED rather than filled in place — see `daReadsExpr`. The
+  // `Expr | null`, NOT `Expr | null | undefined` — three arms is a GENERAL union, which
+  // this subset supports only when `typeof` can tell the arms apart (NT1009), and `null`
+  // and `undefined` are exactly the pair it cannot. Every caller either holds an
+  // `Expr | null` field or has already narrowed an optional one, so the third arm was
+  // never carrying a value; it was carrying a habit.
+  if (e === null) return;
+  // TYPED, and the list is THREADED rather than filled in place — see `daReadsExpr`. The
   // parameter is an `Expr` now too: every call site already passed one (or a `null` the
   // guard above takes), so `unknown` was buying nothing but the reflection it forced.
-  const reads = daReadsExpr(e, new Map<string, Loc | undefined>());
-  for (const [name, loc] of reads) {
+  const reads = daReadsExpr(e, []);
+  for (const r of reads) {
+    const name = r.name;
+    const loc = r.loc;
     const ty = tracked.get(name);
     if (ty === undefined || flow.has(name)) continue;
     throw useBeforeAssign(
