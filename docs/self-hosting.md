@@ -5562,3 +5562,46 @@ Not attempted here. `lexer.ts` is at **rung 3** — it compiles, links and match
 and rewriting how the whole module reports failure is exactly the kind of change that
 should not be started half-done at the end of a stretch. It is the next lane, and it is a
 bounded one: 11 sites, 3 functions, one funnel.
+
+
+## NT1004 IS A COMPILER FEATURE GAP, NOT A SOURCE PROBLEM — the census
+
+The lexer's eight throws were worth funnelling by hand: bounded, and it took `lexer.ts`
+through NT1004 entirely. Before doing the same to `parser.ts` I counted the rest. Asked of
+the project's own parser (walking for `ThrowStmt`, tracking the enclosing frame and whether
+a `try` lexically encloses it) — `bun run test/../throwcensus`, and NOT brace-counting,
+which is defeated by braces inside string literals and put a third of the lexer's throws in
+the wrong frames on the first attempt:
+
+| module | throws outside a `try` in their own frame | frames |
+|---|---:|---:|
+| `checker.ts` | **398** | 65 |
+| `parser.ts` | **98** | 47 |
+| `codegen.ts` | 40 | 24 |
+| `driver.ts` | 8 | 7 |
+| `modules.ts` | 7 | 3 |
+| `lexer.ts` | 5 | 1 |
+| `cli.ts` | 1 | 1 |
+| `ast.ts`, `ownership.ts`, `diagnostics.ts`, `coverage.ts`, `coverage-preprocess.ts` | 0 | 0 |
+| **total** | **557** | **148** |
+
+**557 is an UPPER BOUND, not the blocker count**, and the distinction is load-bearing. A
+throw outside a `try` is still legal when *every call site of its function catches* — it
+crosses one frame. `lexer.ts`'s remaining 5 are exactly that: they sit in `lex`, whose only
+caller (`tokenize`) wraps it in a `try`, so the census counts them and codegen does not.
+Establishing the true number needs the call-site analysis codegen's escape scan already
+does. What is certain is the shape: `parser.ts:345` is a confirmed NT1004, and there are
+another 97 in that module behind it.
+
+**So hand-funnelling stops here.** Doing to `checker.ts` what was done to `lexer.ts` means
+threading an error channel through 65 frames and changing what most of the module's methods
+return — hand-implementing exception propagation in the source of a compiler whose job is
+to implement it. The eight-site version was a bounded win; the 557-site version is the
+feature, written by hand, in the wrong place.
+
+**The next self-hosting step is CODEGEN: let an exception cross more than one frame.** That
+is a compiler feature with a known shape (the pending-exception protocol already exists for
+uncaught host failures and for the single-frame propagation `scanEscaping` proves), and it
+converts 148 frames of source churn into one lowering change. Everything else in this
+document is downstream of it — `checker.ts` and `parser.ts` are the two largest modules and
+both are gated on it.
