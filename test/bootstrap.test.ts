@@ -688,12 +688,12 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // -> NT1605 (an array element bound to a name) -> NT1601. Each is a real rule, and
     // NT1605 shipped with NO HINT — the only NT16xx without one — which is fixed here and
     // whose advice was compiled against node before being followed.
-    // ...parser.ts is now NINETEEN refusals deep into the OWNERSHIP pass, and it has
-    // reached the one that no rearrangement answers: `identCalls` holds the same
-    // `CallExpr` the AST holds, ON PURPOSE, so an `awaited` stamp applied later travels
-    // for free. Two owners of one pointer is what the linear model exists to refuse.
-    // docs/self-hosting.md has the loc key that replaces it and why it waits for a test.
-    ["NT1002", "NT1601", "NT1606"],
+    // ...parser.ts is THROUGH the ownership pass — checker-clean AND move-clean — and
+    // dies in CODEGEN now, on the one-frame exception rule (NT1004). The `throw` is in
+    // `lexer.ts`'s `decodeEscapeAt`, and lexer.ts measured ALONE is at rung 3: standalone
+    // it contains no `try`, so that throw is uncatchable and lowers to node's uncaught
+    // path; linked, the program has `try`s and no caller of `decodeEscapeAt` catches.
+    ["NT1002", "NT1004", "NT1606"],
     );
     // RE-MEASURED AT THE MERGE, and NEITHER SIDE WAS RIGHT — which is the whole argument
     // for re-measuring instead of picking one. This lane's list still carried NT1009
@@ -1334,8 +1334,8 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     expect((byCode["NT1604"] ?? []).slice().sort()).toEqual([]);
     // parser.ts is three refusals into the OWNERSHIP pass now — reached only because the
     // checker passes it entirely (0 of 118 functions refused).
-    expect((byCode["NT1605"] ?? []).slice().sort()).toEqual([]);
-    expect((byCode["NT1601"] ?? []).slice().sort()).toEqual(["parser.ts"]);
+    expect((byCode["NT1601"] ?? []).slice().sort()).toEqual([]);
+    expect((byCode["NT1004"] ?? []).slice().sort()).toEqual(["parser.ts"]);
     // RATCHET MOVE (short-circuit narrowing): the NT2001 bucket is now EMPTY. It held
     // one module, `diagnostics.ts`, on `!diag.spans || diag.spans.length === 0` — a
     // FALSE POSITIVE (correct TypeScript, correct at runtime) because a guard did not

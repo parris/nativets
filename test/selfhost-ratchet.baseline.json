@@ -1,11 +1,11 @@
 {
   "recordedAt": {
     "date": "2026-08-12",
-    "rev": "bf191e1"
+    "rev": "a43594a"
   },
   "modules": {
     "ast.ts": {
-      "sha256": "1c76c1a0c0e7f106",
+      "sha256": "b219239c8c3bd120",
       "standalone": {
         "stage": "clear",
         "code": "",
@@ -45,7 +45,7 @@
       }
     },
     "codegen.ts": {
-      "sha256": "f0f06c956811d096",
+      "sha256": "128026e25151d17b",
       "standalone": {
         "stage": "check",
         "code": "NT1012",
@@ -152,16 +152,16 @@
       }
     },
     "parser.ts": {
-      "sha256": "b2384f0237a7784b",
+      "sha256": "4292581422dfe376",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
         "message": "[NT2001] Property 'kind' does not exist on number at L:C"
       },
       "linked": {
-        "stage": "ownership",
-        "code": "NT1601",
-        "message": "[NT1601] use of moved value: `call`"
+        "stage": "codegen",
+        "code": "NT1004",
+        "message": "[NT1004] `throw` that is not inside a `try` in the same function is not supported yet at L:C"
       }
     }
   }

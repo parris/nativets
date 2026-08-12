@@ -5501,3 +5501,34 @@ substitution case.
 Behind the alias the ordering still had to change — everything read `call.callee` and
 `args` *after* the literal moved them — and then `parser.ts` walks on to the next refusal
 (`args[0]!` in the `Error` constructor lowering). The wall was real; it was one wall.
+
+
+### `src/parser.ts` is through the ownership pass — the next wall is CODEGEN, in another module
+
+With the alias gone and the ordering fixed, `parser.ts` passes the checker (0 of 119) and
+the entire ownership pass. It dies in **codegen**, on the one-frame exception rule:
+
+```
+error[NT1004]: `throw` that is not inside a `try` in the same function
+     --> src/lexer.ts:228:5
+  228 |     throw new LexError(`Octal escape sequences are not allowed at …`);
+```
+
+**This is a LINKED-ONLY refusal, and that is the interesting part.** `lexer.ts` measured
+alone is at **rung 3** — it compiles, links and matches node. Standalone it contains no
+`try` at all, so that throw is `uncatchable()` and lowers to node's uncaught-exception path
+(stderr, exit 1). Linked with `parser.ts` the program *does* contain `try`s, so the
+uncatchable path no longer applies, and the escape scan cannot prove that every caller of
+`decodeEscapeAt` catches — its two call sites (`lexer.ts:489` inside the string scanner,
+`parser.ts:4793` inside `buildTemplate`) are in neither a `try` nor module top level.
+
+So `sh6`'s blame column says **`self`**, not `lexer.ts`, and that is correct for what blame
+measures — "does this dependency, measured alone, die the same way". It does not. The
+standalone and linked columns disagreeing IS the finding; recording it as inherited would
+have hidden it.
+
+The remedies the diagnostic offers are a `try`/`catch` at both call sites or a result value
+(`T | undefined`) instead of a throw. Neither is attempted here: `decodeEscapeAt` is shared
+by the lexer and the template builder, and changing how it reports failure changes the
+`LexError` path both rely on — which earns its own red test first, the same standard the
+floating-async redesign was held to.
