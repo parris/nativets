@@ -768,7 +768,12 @@ class Parser {
         // it, and the sub-parser is where both were produced. Carry it back with the alias.
         for (const [n, shape] of sub.recTypes) this.recTypes = this.recTypes.set(n, shape);
       }
-      if (deferred.length < pending.length) { pending = deferred; continue; }
+      // A COPY, not a move. `pending = deferred` HANDS THE ARRAY OVER, so the reads below
+      // are "use of moved value" — and they are only reachable on the path this branch does
+      // NOT take, which the ownership pass does not track. Spreading keeps `deferred` owned
+      // by this scope for the lines that follow; the list is one round's worth of stuck
+      // type names, so the copy is small and this is a fixpoint loop, not a hot path.
+      if (deferred.length < pending.length) { pending = [...deferred]; continue; }
       // No progress. Everything left is stuck — but on WHAT matters: stuck on another
       // stuck name is a cycle (unfixable), stuck on a name that failed for its own reason
       // is not, and must not be reported as recursion.
@@ -824,9 +829,11 @@ class Parser {
     for (const n of names) this.cycleNames = this.cycleNames.add(n);
     const recBefore = new Map(this.recTypes); // restored wholesale if the round stalls
     let resolved = new Map<string, Ty>();
-    let pending = names;
+    // A COPY: `names` is a PARAMETER, so the caller owns it and `pending = names` would
+    // make this scope a second owner (NT1604). The loop rebinds `pending` each round
+    // anyway, so it was never the same array for long.
+    let pending = [...names];
     while (pending.length) {
-      //@@mutable
       //@@mutable
       const deferred: string[] = [];
       let why = new Map<string, string>(); // residual member -> the error it stalled with
@@ -862,8 +869,16 @@ class Parser {
           // PRECISE catch binding can invalidate an `as` assertion that only type-checked
           // because the binding was imprecise. The cast was never load-bearing — every
           // throw reaching this `catch` comes from `parseStatement`, which raises NTError.
-          if (!(e instanceof NTError)) throw e;   // tsc types a catch binding `unknown`
-          why = why.set(name, e.message.split("\n")[0]!);
+          // The USE is in the `then` and the RETHROW in the `else`, so no path does both.
+          // Written as `if (!(e instanceof NTError)) throw e;` the rethrow MOVES `e` and the
+          // read below it is "use of moved value" — the two are on exclusive paths, which
+          // the ownership pass does not track. (The rethrow exists only for tsc, which
+          // types a catch binding `unknown`; this compiler infers `NTError` here.)
+          if (e instanceof NTError) {
+            why = why.set(name, e.message.split("\n")[0]!);
+          } else {
+            throw e;
+          }
         }
         // THE HARVEST, on every path (see hoistTypeDecls). A back-edge shape this round
         // minted is what the NEXT round's unions expand through, so losing it stalls the
