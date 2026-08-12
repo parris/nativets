@@ -353,22 +353,7 @@ describe("discarded persistent mutators in src/", () => {
     "checker.ts checkDefiniteAssignment: seen.add(…)",
     "checker.ts collectAssigned: <ConditionalExpr>.add(…)",
     "checker.ts collectAssigned: <ConditionalExpr>.add(…)",
-    "checker.ts daReads: out.set(…)",
-    "checker.ts daReads: out.set(…)",
-    "checker.ts daStmt: flow.add(…)",
-    "checker.ts daStmt: flow.add(…)",
-    "checker.ts daStmt: flow.add(…)",
-    "checker.ts daStmt: flow.add(…)",
-    "checker.ts daStmt: flow.add(…)",
-    "checker.ts daStmt: flow.add(…)",
-    "checker.ts daStmt: flow.add(…)",
-    "checker.ts daStmt: flow.clear(…)",
-    "checker.ts daStmt: flow.clear(…)",
-    "checker.ts daStmt: flow.clear(…)",
-    "checker.ts daStmt: flow.clear(…)",
-    "checker.ts daStmt: flow.delete(…)",
-    "checker.ts daStmt: tracked.set(…)",
-    // (The two `moduleOrder` Map parameters that used to head this list are GONE: the
+                                  // (The two `moduleOrder` Map parameters that used to head this list are GONE: the
   // per-parameter `//@@mutable` opt-in accepts a Map/Set now, so the shape that had no
   // legal spelling at all — rebinding is NT1608, and the opt-in was array-only — is
   // simply written. The census skips a marked receiver, per FUNCTION.)

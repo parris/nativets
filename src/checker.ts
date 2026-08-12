@@ -8230,7 +8230,7 @@ function leavesFunction(body: Stmt[]): boolean {
  * them; nothing was ever miscompiled, they were simply refused.
  */
 function leavesBlock(body: Stmt[]): boolean {
-  return daBlock(body, null, new Set<string>(), null) !== "fall";
+  return daBlock(body, new Map<string, Ty | "unknown">(), true, new Set<string>(), null) !== "fall";
 }
 
 /* ============================================================
@@ -8472,8 +8472,9 @@ export function daReadsTypedForTest(s: Stmt): DaRead[] {
 }
 
 /** Refuse every read in `e` of a tracked binding not yet proven assigned. */
-function daUse(e: Expr | null, tracked: DATracked | null, flow: DAFlow): void {
-  if (tracked === null) return; // shape-only mode: nothing is tracked, so nothing to refuse
+function daUse(e: Expr | null, tracked: DATracked, flow: DAFlow): void {
+  // No shape-only check: in that mode `tracked` is EMPTY, so every `get` below misses and
+  // nothing is refused — which is exactly what the `tracked === null` early return said.
   // `Expr | null`, NOT `Expr | null | undefined` — three arms is a GENERAL union, which
   // this subset supports only when `typeof` can tell the arms apart (NT1009), and `null`
   // and `undefined` are exactly the pair it cannot. Every caller either holds an
@@ -8562,18 +8563,54 @@ const daLive = (flows: DAFlow[]): { flow: DAFlow; diverged: boolean }[] =>
 
 
 /** Analyze a statement list. Returns whether control reaches past its end. */
-function daBlock(body: Stmt[], tracked: DATracked | null, flow: DAFlow, esc: DAEscapes): DAExit {
+function daBlock(
+  body: Stmt[],
+  // ACCUMULATOR PARAMETER too — `tracked.set(…)` / `.delete(…)` discard their result, and
+  // a nativets `Map` is persistent exactly as its `Set` is. See `flow` below.
+  //@@mutable
+  tracked: DATracked,
+  shapeOnly: boolean,
+  // ACCUMULATOR PARAMETER. `flow.add(…)` / `flow.clear()` discard their result, which is
+  // an in-place mutation under bun and a NO-OP under nativets, where a `Set` is PERSISTENT
+  // and `.add` answers a new one (docs/divergences.md §A). The attribute is what makes the
+  // in-place entry point legal — on the BINDING, not on `DAFlow`, since marking the type
+  // would make it nominal (measured regression, docs/self-hosting.md). Same device
+  // `collectIdents`' `out` uses.
+  //@@mutable
+  flow: DAFlow,
+  esc: DAEscapes,
+): DAExit {
   for (const s of body) {
-    if (daStmt(s, tracked, flow, esc) === "left") return "left"; // the rest is unreachable
+    if (daStmt(s, tracked, shapeOnly, flow, esc) === "left") return "left"; // the rest is unreachable
   }
   return "fall";
 }
 
 /** Analyze one statement in place, mutating `flow`. Returns whether control reaches past it. */
-function daStmt(s: Stmt, tracked: DATracked | null, flow: DAFlow, esc: DAEscapes): DAExit {
+function daStmt(
+  s: Stmt,
+  // ACCUMULATOR PARAMETER too — `tracked.set(…)` / `.delete(…)` discard their result, and
+  // a nativets `Map` is persistent exactly as its `Set` is. See `flow` below.
+  //@@mutable
+  tracked: DATracked,
+  // SHAPE-ONLY MODE, was `tracked === null`. It has to be a separate flag because
+  // `@@mutable` cannot mark a NULLABLE parameter (NT1023) — and the marker is what makes
+  // the in-place `.set`/`.delete` above legal. Only ONE caller ever passed `null`
+  // (`leavesBlock`), so this is a flag in place of a sentinel, not a new concept.
+  shapeOnly: boolean,
+  // ACCUMULATOR PARAMETER. `flow.add(…)` / `flow.clear()` discard their result, which is
+  // an in-place mutation under bun and a NO-OP under nativets, where a `Set` is PERSISTENT
+  // and `.add` answers a new one (docs/divergences.md §A). The attribute is what makes the
+  // in-place entry point legal — on the BINDING, not on `DAFlow`, since marking the type
+  // would make it nominal (measured regression, docs/self-hosting.md). Same device
+  // `collectIdents`' `out` uses.
+  //@@mutable
+  flow: DAFlow,
+  esc: DAEscapes,
+): DAExit {
   switch (s.kind) {
     case "VarDecl":
-      if (tracked === null) return "fall"; // shape-only: a declaration changes no control flow
+      if (shapeOnly) return "fall"; // shape-only: a declaration changes no control flow
       for (const d of s.decls) {
         // This analysis is NAME-based, and so is codegen (one slot per name per
         // function). A redeclaration of a name already being tracked is therefore
@@ -8598,7 +8635,7 @@ function daStmt(s: Stmt, tracked: DATracked | null, flow: DAFlow, esc: DAEscapes
       const e = s.expr;
       // The one form that ASSIGNS: `x = v` at statement level. The value is evaluated
       // first, so its reads are checked against the state BEFORE the write lands.
-      if (e.kind === "AssignExpr" && e.op === "=" && tracked !== null && tracked.has(e.target)) {
+      if (e.kind === "AssignExpr" && e.op === "=" && tracked.has(e.target)) {
         daUse(e.value, tracked, flow);
         flow.add(e.target);
         return "fall";
@@ -8607,7 +8644,7 @@ function daStmt(s: Stmt, tracked: DATracked | null, flow: DAFlow, esc: DAEscapes
       // CONSTRUCTOR field. Truthiness on `viaThis`, not `=== true`: it is optional, and
       // comparing a `?Uboolean` against a plain `boolean` is outside the subset `src/`
       // has to stay inside (NT2001).
-      if (e.kind === "FieldAssign" && e.viaThis && tracked !== null && tracked.has(daField(e.field))) {
+      if (e.kind === "FieldAssign" && e.viaThis && tracked.has(daField(e.field))) {
         daUse(e.value, tracked, flow);
         flow.add(daField(e.field));
         return "fall";
@@ -8629,9 +8666,9 @@ function daStmt(s: Stmt, tracked: DATracked | null, flow: DAFlow, esc: DAEscapes
     case "IfStmt": {
       daUse(s.test, tracked, flow);
       const con = new Set(flow);
-      const conExit = daBlock(s.consequent, tracked, con, esc);
+      const conExit = daBlock(s.consequent, tracked, shapeOnly, con, esc);
       const alt = new Set(flow);
-      const altExit: DAExit = s.alternate ? daBlock(s.alternate, tracked, alt, esc) : "fall";
+      const altExit: DAExit = s.alternate ? daBlock(s.alternate, tracked, shapeOnly, alt, esc) : "fall";
       // Only an arm that reaches THIS point contributes to the intersection; one that
       // left is already recorded wherever it landed.
       const merged = daMerge([{ flow: con, diverged: conExit === "left" }, { flow: alt, diverged: altExit === "left" }], flow);
@@ -8646,7 +8683,7 @@ function daStmt(s: Stmt, tracked: DATracked | null, flow: DAFlow, esc: DAEscapes
     // to this loop and must not be charged to the switch around it.
     case "WhileStmt": {
       daUse(s.test, tracked, flow);
-      daBlock(s.body, tracked, new Set(flow), { breaks: [], conts: [], rets: esc ? esc.rets : [] });
+      daBlock(s.body, tracked, shapeOnly, new Set(flow), { breaks: [], conts: [], rets: esc ? esc.rets : [] });
       return "fall";
     }
 
@@ -8659,7 +8696,7 @@ function daStmt(s: Stmt, tracked: DATracked | null, flow: DAFlow, esc: DAEscapes
       //     do { continue; } while (false);        // `continue` runs the TEST, then exits
       const mine = { breaks: [] as DAFlow[], conts: [] as DAFlow[], rets: esc ? esc.rets : [] };
       const body = new Set(flow);
-      const exit = daBlock(s.body, tracked, body, mine);
+      const exit = daBlock(s.body, tracked, shapeOnly, body, mine);
       const after = daMerge(
         [{ flow: body, diverged: exit === "left" }, ...daLive(mine.breaks), ...daLive(mine.conts)],
         flow);
@@ -8671,25 +8708,25 @@ function daStmt(s: Stmt, tracked: DATracked | null, flow: DAFlow, esc: DAEscapes
 
     case "ForStmt": {
       if (s.init) { // the init runs exactly once, so its assignments are kept
-        if ((s.init as Stmt).kind === "VarDecl") daStmt(s.init as Stmt, tracked, flow, esc);
+        if ((s.init as Stmt).kind === "VarDecl") daStmt(s.init as Stmt, tracked, shapeOnly, flow, esc);
         else daUse(s.init as Expr, tracked, flow);
       }
       daUse(s.test, tracked, flow);
       const body = new Set(flow);
-      daBlock(s.body, tracked, body, { breaks: [], conts: [], rets: esc ? esc.rets : [] }); // may run zero times
+      daBlock(s.body, tracked, shapeOnly, body, { breaks: [], conts: [], rets: esc ? esc.rets : [] }); // may run zero times
       daUse(s.update, tracked, body);
       return "fall";
     }
 
     case "ForOfStmt": {
       daUse(s.iterable, tracked, flow);
-      daBlock(s.body, tracked, new Set(flow), { breaks: [], conts: [], rets: esc ? esc.rets : [] }); // may run zero times
+      daBlock(s.body, tracked, shapeOnly, new Set(flow), { breaks: [], conts: [], rets: esc ? esc.rets : [] }); // may run zero times
       return "fall";
     }
 
     case "ForInStmt": {
       daUse(s.object, tracked, flow);
-      daBlock(s.body, tracked, new Set(flow), { breaks: [], conts: [], rets: esc ? esc.rets : [] }); // may run zero times
+      daBlock(s.body, tracked, shapeOnly, new Set(flow), { breaks: [], conts: [], rets: esc ? esc.rets : [] }); // may run zero times
       return "fall";
     }
 
@@ -8707,7 +8744,7 @@ function daStmt(s: Stmt, tracked: DATracked | null, flow: DAFlow, esc: DAEscapes
       const paths = s.cases.map((c) => {
         const f = new Set(flow);
         if (c.test) daUse(c.test, tracked, f);
-        return { flow: f, diverged: daBlock(c.body, tracked, f, mine) === "left" };
+        return { flow: f, diverged: daBlock(c.body, tracked, shapeOnly, f, mine) === "left" };
       });
       const hasDefault = s.cases.some((c) => c.test === null);
       const all = [...paths, ...daLive(mine.breaks)];
@@ -8720,14 +8757,14 @@ function daStmt(s: Stmt, tracked: DATracked | null, flow: DAFlow, esc: DAEscapes
 
     case "TryStmt": {
       const tryFlow = new Set(flow);
-      const tryExit = daBlock(s.block, tracked, tryFlow, esc);
+      const tryExit = daBlock(s.block, tracked, shapeOnly, tryFlow, esc);
       let after: DAFlow;
       let exit: DAExit;
       if (s.handler) {
         // The handler starts from the try's ENTRY state: the throw may have happened
         // before any assignment in the block landed, so none of them can be assumed.
         const catchFlow = new Set(flow);
-        const catchExit = daBlock(s.handler, tracked, catchFlow, esc);
+        const catchExit = daBlock(s.handler, tracked, shapeOnly, catchFlow, esc);
         after = daMerge([{ flow: tryFlow, diverged: tryExit === "left" }, { flow: catchFlow, diverged: catchExit === "left" }], flow);
         exit = tryExit === "fall" || catchExit === "fall" ? "fall" : "left";
       } else {
@@ -8740,13 +8777,13 @@ function daStmt(s: Stmt, tracked: DATracked | null, flow: DAFlow, esc: DAEscapes
         // ...and it can OVERRIDE how the try left: a `return`/`break` in a `finally`
         // wins over whatever the block was doing (node agrees — that is why `finally`
         // can swallow a throw).
-        if (daBlock(s.finalizer, tracked, flow, esc) === "left") exit = "left";
+        if (daBlock(s.finalizer, tracked, shapeOnly, flow, esc) === "left") exit = "left";
       }
       return exit;
     }
 
-    case "BlockStmt": return daBlock(s.body, tracked, flow, esc);
-    case "MultiStmt": return daBlock(s.stmts, tracked, flow, esc);
+    case "BlockStmt": return daBlock(s.body, tracked, shapeOnly, flow, esc);
+    case "MultiStmt": return daBlock(s.stmts, tracked, shapeOnly, flow, esc);
     case "FuncDecl": return "fall"; // its body is analyzed on its own, below
     // The one `Stmt` kind with no arm. It is SYNTHETIC — inserted after this pass, by the
     // ownership analysis, to mark where a scope's drops go — so it never reaches here in
@@ -8870,7 +8907,7 @@ function daCheckCtorExit(
  * `daUse` is shape-blind and descends into it.
  */
 function checkDefiniteAssignment(body: Stmt[]): void {
-  daBlock(body, new Map<string, Ty | "unknown">(), new Set<string>(), null);
+  daBlock(body, new Map<string, Ty | "unknown">(), false, new Set<string>(), null);
   const seen = new Set<unknown>();
   const walk = (node: unknown): void => {
     if (Array.isArray(node)) { for (const x of node) walk(x); return; }
@@ -8901,7 +8938,7 @@ function checkDefiniteAssignment(body: Stmt[]): void {
       for (const f of fields.keys()) tracked = tracked.set(daField(f), fields.get(f) ?? "unknown");
       const flow = new Set<string>();
       const esc = { breaks: [] as DAFlow[], conts: [] as DAFlow[], rets: [] as DAFlow[] };
-      const exit = daBlock(nested as Stmt[], tracked, flow, esc);
+      const exit = daBlock(nested as Stmt[], tracked, false, flow, esc);
       if (fields.size > 0) daCheckCtorExit(fn, fields, flow, exit, esc.rets);
     }
     for (const v of Object.values(node)) walk(v);
